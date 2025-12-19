@@ -29,7 +29,7 @@ jobs:
     - name: 克隆源码（固定3.4内核，RT-N14U适配）
       run: |
         # RT-N14U仅支持3.4内核，删除4.4内核判断，直接克隆对应源码
-        git clone --depth=1 https://github.com/chongshengB/rt-n56u.git /opt/rt-n56u
+        git clone --depth=1 https://github.com/bqtlq/rt-n56u.git /opt/rt-n56u
         cd /opt/rt-n56u/toolchain-mipsel
         sh dl_toolchain.sh  # 下载编译工具链
         mkdir -p /opt/images/  # 创建固件输出目录
