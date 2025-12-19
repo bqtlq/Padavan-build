@@ -1,4 +1,4 @@
-name: Build Padavan-RT-N14U
+name: Build Padavan-YZ-100A  # 改1：脚本名称，对应你的路由器型号
 
 # 精简触发条件：仅手动触发（workflow_dispatch）+ 标签触发，避免误编译
 on: 
@@ -26,22 +26,22 @@ jobs:
         cpio git gettext automake autopoint texinfo build-essential pkg-config \
         zlib1g-dev libgmp3-dev libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev
 
-    - name: 克隆源码（固定3.4内核，RT-N14U适配）
+    - name: 克隆源码（固定3.4内核，YZ-100A适配）
       run: |
-        # RT-N14U仅支持3.4内核，删除4.4内核判断，直接克隆对应源码
+        # YZ-100A（MT7620）仅支持3.4内核，直接克隆对应源码
         git clone --depth=1 https://github.com/bqtlq/rt-n56u.git /opt/rt-n56u
         cd /opt/rt-n56u/toolchain-mipsel
         sh dl_toolchain.sh  # 下载编译工具链
         mkdir -p /opt/images/  # 创建固件输出目录
 
-    - name: 编译固件（极致精简，仅保留基础网络功能）
+    - name: 编译固件（极致精简，适配YZ-100A+静态IP双WAN）
       env:
-        TNAME: RT-N14U  # 关键：RT-N14U的模板名（需和configs/templates/下一致）
+        TNAME: YZ-100A  # 改2：核心模板名，必须和源码configs/templates/下的YZ-100A.config一致
       run: |
         cd /opt/rt-n56u/trunk
-        # 检查模板文件是否存在，不存在则终止
+        # 检查模板文件是否存在，不存在则终止（确保型号正确）
         if [ ! -f configs/templates/$TNAME.config ] ; then
-          echo "错误：未找到 $TNAME.config 模板文件！"
+          echo "错误：未找到 $TNAME.config 模板文件！请确认源码templates目录下的文件名"
           exit 1
         fi
         cp -f configs/templates/$TNAME.config .config
@@ -50,23 +50,26 @@ jobs:
         # 先清空所有可选功能配置项
         sed -i '/CONFIG_FIRMWARE_INCLUDE_/d' .config
 
-        # ========== 仅保留基础功能（适配双WAN需求） ==========
-        # 基础网络/SSH/OpenSSL（双WAN必需）
-        echo "CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_SSHD=y" >> .config  # 保留SSH（方便调试）
-        echo "CONFIG_FIRMWARE_INCLUDE_DNSMASQ=y" >> .config  # DNS基础功能
-        echo "CONFIG_FIRMWARE_INCLUDE_IPTABLES=y" >> .config  # 防火墙（双WAN必需）
-        echo "CONFIG_FIRMWARE_INCLUDE_PPPOE=y" >> .config  # PPPoE拨号（宽带必需）
-        echo "CONFIG_FIRMWARE_INCLUDE_DHCPD=y" >> .config  # DHCP服务（双WAN自动获取IP必需）
+        # ========== 仅保留基础功能（适配静态IP双WAN需求） ==========
+        # 基础网络/SSH/OpenSSL（静态IP双WAN必需）
+        echo "CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE=y" >> .config  # 基础加密（必需）
+        echo "CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y" >> .config    # 轻量SSH（0.3MB，替代SSHD，更精简）
+        echo "CONFIG_FIRMWARE_INCLUDE_DNSMASQ=y" >> .config     # DNS解析（静态IP必需）
+        echo "CONFIG_FIRMWARE_INCLUDE_DHCPD=y" >> .config       # LAN侧DHCP（给终端分配IP，必需）
+
+        # ========== 砍掉你用不到的功能（核心精简） ==========
+        echo "CONFIG_FIRMWARE_INCLUDE_PPPOE=n" >> .config       # 你用静态IP，无需PPPoE
+        echo "CONFIG_FIRMWARE_INCLUDE_IPTABLES=n" >> .config    # 你无需防火墙，关闭
+        echo "CONFIG_FIRMWARE_INCLUDE_OPENSSH=n" >> .config     # 关闭重型OpenSSH
 
         # ========== 开始编译 ==========
         sudo ./clear_tree  # 清理编译缓存
-        sudo ./build_firmware_modify $TNAME 0  # 编译固件
+        sudo ./build_firmware_modify $TNAME 0  # 编译固件（用YZ-100A模板）
         sudo mv -f images/*.trx /opt/images/  # 移动固件到输出目录
 
     - name: 上传编译好的固件
       uses: actions/upload-artifact@master
       if: always()  # 即使编译失败也上传日志（方便排查）
       with:
-        name: Padavan-RT-N14U
+        name: Padavan-YZ-100A  # 改3：上传的固件包名称，对应你的路由器型号
         path: /opt/images
