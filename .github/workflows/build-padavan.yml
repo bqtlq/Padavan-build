@@ -61,6 +61,7 @@ jobs:
         echo "CONFIG_FIRMWARE_INCLUDE_PPPOE=n" >> .config       # 你用静态IP，无需PPPoE
         echo "CONFIG_FIRMWARE_INCLUDE_IPTABLES=n" >> .config    # 你无需防火墙，关闭
         echo "CONFIG_FIRMWARE_INCLUDE_OPENSSH=n" >> .config     # 关闭重型OpenSSH
+        echo "CONFIG_FIRMWARE_INCLUDE_SSHD=y" >> .config  # 保留SSH（方便调试）
 
         # ========== 开始编译 ==========
         sudo ./clear_tree  # 清理编译缓存
