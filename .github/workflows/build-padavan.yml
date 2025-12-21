@@ -66,11 +66,16 @@ jobs:
         # ========== 开始编译 ==========
         sudo ./clear_tree  # 清理编译缓存
         sudo ./build_firmware_modify $TNAME 0  # 编译固件（用YZ-100A模板）
-        sudo mv -f images/*.trx /opt/images/  # 移动固件到输出目录
+        # 关键修改1：确认.trx文件路径，移动时保留原文件名（避免重命名导致识别问题）
+        sudo find /opt/rt-n56u/trunk/images -name "*.trx" -exec cp -f {} /opt/images/ \;
+        # 可选：输出文件列表，确认.trx已移动成功
+        ls -l /opt/images/
 
-    - name: 上传编译好的固件
-      uses: actions/upload-artifact@master
+    - name: 上传编译好的固件（直接输出.trx文件，非压缩包）
+      uses: actions/upload-artifact@v4  # 关键修改2：升级到v4版本，默认不压缩单个文件
       if: always()  # 即使编译失败也上传日志（方便排查）
       with:
         name: Padavan-YZ-100A  # 改3：上传的固件包名称，对应你的路由器型号
-        path: /opt/images
+        path: /opt/images/*.trx  # 关键修改3：只上传.trx文件，精准匹配
+        if-no-files-found: error  # 没有.trx文件则报错，提示编译失败
+        retention-days: 30  # 固件保留30天，可按需调整
