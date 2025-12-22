@@ -15,34 +15,28 @@ jobs:
       - name: 安装官方依赖
         run: |
           sudo apt update -y
-          # 无需unzip，恢复tar.gz依赖（zlib1g-dev已包含解压支持）
           sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
-          echo "✅ 依赖安装完成（适配tar.gz格式）"
+          echo "✅ 依赖安装完成"
 
-      - name: 终极清理（含新包残留）
+      - name: 终极清理（含fmk目录）
         run: |
-          # 清理新链接对应的tar.gz包及旧文件
-          sudo rm -rf fmk firmware-mod-kit final_fw.bin ros.bin padavan_source fmk_099.tar.gz 2>/dev/null
+          sudo rm -rf fmk final_fw.bin ros.bin padavan_source fmk_099.tar.gz 2>/dev/null
           echo "✅ 残留清理完成"
 
-      - name: 下载FMK官方tar.gz包（新链接，含old脚本）
+      - name: 下载+解压FMK（直接生成fmk目录，无需重命名）
         run: |
-          # 使用用户提供的Google Code归档新链接
+          # 下载新链接包
           wget https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/firmware-mod-kit/fmk_099.tar.gz
-          # 解压tar.gz包（-zxvf适配gzip压缩，-C指定目录避免混乱）
-          tar -zxvf fmk_099.tar.gz -C ./
-          # 验证解压后的目录名（Google Code旧包默认目录为firmware-mod-kit-0.99，若不同需调整）
-          if [ -d "firmware-mod-kit-0.99" ]; then
-            mv firmware-mod-kit-0.99 fmk
-          elif [ -d "firmware-mod-kit" ]; then
-            mv firmware-mod-kit fmk  # 兼容可能的目录名差异
-          else
-            echo "ERROR: 解压后未找到FMK核心目录"
+          # 解压后直接生成fmk目录（无需指定-C，tar会自动创建）
+          tar -zxvf fmk_099.tar.gz
+          # 验证fmk目录是否存在，且包含核心old脚本
+          if [ ! -d "fmk" ] || [ ! -f "fmk/old-extract.sh" ] || [ ! -f "fmk/old-build.sh" ]; then
+            echo "ERROR: fmk目录或核心old脚本缺失"
+            ls -l ./  # 输出当前目录结构，便于排查
             exit 1
           fi
-          # 删除tar.gz包节省空间
           rm -f fmk_099.tar.gz
-          echo "✅ 新链接包下载解压完成，含old-extract.sh/old-build.sh"
+          echo "✅ 下载解压完成，fmk目录及old脚本已确认存在"
 
       - name: 给old脚本加执行权限
         run: |
