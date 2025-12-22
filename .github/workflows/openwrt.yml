@@ -40,41 +40,67 @@ jobs:
             exit 1
           fi
 
-      - name: 自动扫描固件参数（修复字符污染问题）
+      - name: 自动扫描固件参数（彻底修复变量为空问题）
         run: |
-          # 扫描uImage头部参数
+          # 初始化默认参数（优先保证变量非空）
+          IMAGE_ARCH="mips"
+          IMAGE_ADDR="0x80060000"
+          IMAGE_ENTRY="0x80060000"
+          IMAGE_COMP="lzma"
+          SQSH_COMP="xz"
+          SQSH_BLOCK="262144"
+
+          # 扫描uImage头部参数（适配不同mkimage输出格式）
           if mkimage -l $FW_FILE 2>/dev/null; then
-            IMAGE_ARCH=$(mkimage -l $FW_FILE | grep -i "Architecture" | awk '{print $3}' | sed 's/://g' | tr -d ' ')
-            IMAGE_ADDR=$(mkimage -l $FW_FILE | grep -i "Data Address" | awk '{print $4}' | tr -d ' ')
-            IMAGE_ENTRY=$(mkimage -l $FW_FILE | grep -i "Entry Point" | awk '{print $4}' | tr -d ' ')
-            IMAGE_COMP=$(mkimage -l $FW_FILE | grep -i "Compression" | awk '{print $3}' | sed 's/://g' | tr -d ' ')
-          else
-            IMAGE_ARCH="mips"
-            IMAGE_ADDR="0x80060000"
-            IMAGE_ENTRY="0x80060000"
-            IMAGE_COMP="lzma"
+            # 提取架构（兼容Arch/Architecture关键词）
+            ARCH_LINE=$(mkimage -l $FW_FILE | grep -Ei "Arch|Architecture")
+            if [ -n "$ARCH_LINE" ]; then
+              IMAGE_ARCH=$(echo $ARCH_LINE | awk '{print $NF}' | sed 's/://g' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+            fi
+            # 提取加载地址（兼容Data Address/Load Address）
+            ADDR_LINE=$(mkimage -l $FW_FILE | grep -Ei "Data Address|Load Address")
+            if [ -n "$ADDR_LINE" ]; then
+              IMAGE_ADDR=$(echo $ADDR_LINE | awk '{print $NF}' | tr -d ' ')
+            fi
+            # 提取入口地址
+            ENTRY_LINE=$(mkimage -l $FW_FILE | grep -Ei "Entry Point")
+            if [ -n "$ENTRY_LINE" ]; then
+              IMAGE_ENTRY=$(echo $ENTRY_LINE | awk '{print $NF}' | tr -d ' ')
+            fi
+            # 提取压缩格式
+            COMP_LINE=$(mkimage -l $FW_FILE | grep -Ei "Compression")
+            if [ -n "$COMP_LINE" ]; then
+              IMAGE_COMP=$(echo $COMP_LINE | awk '{print $NF}' | sed 's/://g' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+            fi
           fi
-          # 扫描Squashfs参数（修复冒号/空格污染）
+
+          # 扫描Squashfs参数（修复字符污染）
           if binwalk $FW_FILE | grep -i "Squashfs filesystem" 2>/dev/null; then
-            # 提取压缩格式并清理冒号、空格等多余字符
-            SQSH_COMP=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print $i}' | sed 's/compression://g' | tr -d ' :')
-            # 提取块大小并清理空格、单位
-            SQSH_BLOCK=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print $i}' | sed 's/blocksize://g; s/ bytes//g' | tr -d ' ')
-          else
-            SQSH_COMP="xz"
-            SQSH_BLOCK="262144"
+            # 提取压缩格式
+            SQSH_COMP_LINE=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | grep -i "compression")
+            if [ -n "$SQSH_COMP_LINE" ]; then
+              SQSH_COMP=$(echo $SQSH_COMP_LINE | sed -E 's/.*compression: *([a-z0-9]+).*/\1/' | tr -d ' ')
+            fi
+            # 提取块大小
+            SQSH_BLOCK_LINE=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | grep -i "blocksize")
+            if [ -n "$SQSH_BLOCK_LINE" ]; then
+              SQSH_BLOCK=$(echo $SQSH_BLOCK_LINE | sed -E 's/.*blocksize: *([0-9]+).*/\1/' | tr -d ' ')
+            fi
           fi
-          # 参数兜底+最终清理（确保无多余字符）
-          IMAGE_ARCH=${IMAGE_ARCH:-"mips"} | tr -d ' '
-          IMAGE_ADDR=${IMAGE_ADDR:-"0x80060000"} | tr -d ' '
-          IMAGE_ENTRY=${IMAGE_ENTRY:-"0x80060000"} | tr -d ' '
-          IMAGE_COMP=${IMAGE_COMP:-"lzma"} | tr -d ' :'
-          SQSH_COMP=${SQSH_COMP:-"xz"} | tr -d ' :'
-          SQSH_BLOCK=${SQSH_BLOCK:-"262144"} | tr -d ' '
+
+          # 最终参数校验（确保关键参数有效）
+          IMAGE_ARCH=${IMAGE_ARCH:-"mips"}
+          IMAGE_ADDR=${IMAGE_ADDR:-"0x80060000"}
+          IMAGE_ENTRY=${IMAGE_ENTRY:-"0x80060000"}
+          IMAGE_COMP=${IMAGE_COMP:-"lzma"}
+          SQSH_COMP=${SQSH_COMP:-"xz"}
+          SQSH_BLOCK=${SQSH_BLOCK:-"262144"}
+
           # 输出参数（方便调试）
           echo "📌 固件参数："
           echo "架构：$IMAGE_ARCH | 加载地址：$IMAGE_ADDR | 入口地址：$IMAGE_ENTRY | 内核压缩：$IMAGE_COMP"
           echo "文件系统压缩：$SQSH_COMP | 块大小：$SQSH_BLOCK"
+
           # 存入环境变量
           echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
           echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
@@ -95,15 +121,15 @@ jobs:
             exit 1
           fi
 
-      - name: 自动打包rootfs（修复压缩格式识别）
+      - name: 自动打包rootfs
         run: |
           cd ros.extracted/rootfs
           sudo mksquashfs . ../rootfs.sqsh -b $SQSH_BLOCK -comp $SQSH_COMP -no-xattrs -all-root
           cd ../../
 
-      - name: 重建uImage头部（修复启动问题）
+      - name: 重建uImage头部（添加镜像名，兼容所有mkimage版本）
         run: |
-          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -d ros.extracted/rootfs.sqsh final_fw.bin
+          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "ROS_Firmware" -d ros.extracted/rootfs.sqsh final_fw.bin
 
       - name: 上传修改后的固件
         uses: actions/upload-artifact@v4
