@@ -73,14 +73,13 @@ jobs:
           echo "✅ Squashfs解包完成（未修改任何文件）"
           ls -l rootfs/ | head -n10
 
-      # 关键：跳过所有删除操作，直接打包
+      # 关键：跳过所有删除操作，直接打包（移除不兼容参数）
       - name: 直接重新打包Squashfs镜像（无修改）
         run: |
           echo "=== 开始重新打包Squashfs（未修改任何文件） ==="
-          # 打包参数与原固件完全一致：xz压缩+256K块+MIPS优化
+          # 移除不兼容的-Xbcj mips参数，保留核心参数与原固件一致
           mksquashfs rootfs/ firmware_split/new_rootfs.squashfs \
-            -comp xz -b 262144 -noappend -all-root -processors 2 \
-            -Xbcj mips  # 针对MIPS架构优化，贴近原固件压缩效果
+            -comp xz -b 262144 -noappend -all-root -processors 2
           
           if [ ! -f "firmware_split/new_rootfs.squashfs" ]; then
             echo "ERROR: 打包失败"
@@ -92,10 +91,9 @@ jobs:
       - name: 用mkimage重建uImage头部（核心修复，确保启动）
         run: |
           echo "=== 重建uImage头部并合并固件 ==="
-          # 关键：用mkimage生成新的uImage头部（原头部校验值已失效）
           # 参数与原固件完全一致（从原固件解析得出）
           mkimage \
-            -A mips \                # 架构：MIPS
+            -A mips \                # 架构：MIPS（适配mt7620）
             -O linux \               # 系统：Linux
             -T kernel \              # 类型：内核镜像
             -C lzma \                # 压缩方式：lzma（原固件内核压缩方式）
