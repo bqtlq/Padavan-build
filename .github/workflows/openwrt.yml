@@ -1,4 +1,4 @@
-name: FMK自动解包+打包（潘多拉稳定版，修复目录冲突）
+name: FMK自动解包+打包（潘多拉终极稳定版）
 on:
   workflow_dispatch:  # 手动触发
   push:
@@ -40,20 +40,22 @@ jobs:
           file PandoraBox.bin
           echo "=== 固件准备完成 ==="
 
-      - name: 清理残留目录+FMK自动解包（修复冲突）
+      - name: 超级清理+FMK自动解包（终极修复冲突）
         run: |
-          # 核心修复：先删除已有目录，避免冲突
-          rm -rf fmk_work
-          mkdir -p fmk_work
+          echo "=== 彻底清理残留目录 ==="
+          # 终极清理：sudo强制删除，确保无任何残留
+          sudo rm -rf fmk_work 2>/dev/null
+          # 不提前创建目录，让FMK自动创建（彻底避免存在性检测）
           
           echo "=== FMK自动解包固件 ==="
-          # 帖子推荐命令：自动识别TRX/uImage格式，精准分离各部分
-          ./fmk/extract-firmware.sh PandoraBox.bin fmk_work
+          # 帖子推荐命令，添加-v参数输出详细日志，方便排错
+          ./fmk/extract-firmware.sh -v PandoraBox.bin fmk_work
           
           # 验证解包成功（帖子强调检查rootfs目录）
           if [ ! -d "fmk_work/rootfs" ]; then
             echo "ERROR: FMK解包失败，无rootfs目录！"
-            ls -l fmk_work/  # 输出解包目录，方便排错
+            echo "=== 解包目录详情 ==="
+            ls -la fmk_work/  # 输出所有文件，包括隐藏文件
             exit 1
           fi
           echo "✅ FMK自动解包完成"
@@ -63,10 +65,9 @@ jobs:
         run: |
           echo "=== 用FMK自动打包（贴合帖子格式要求） ==="
           cd fmk_work
-          # 帖子核心打包命令：自动重建TRX/uImage头部，保留原格式
-          # 指定Squashfs版本为4.0（原固件版本，避免兼容问题）
-          ../fmk/build-firmware.sh \
-            -s 4.0 \  # 关键：匹配原固件Squashfs版本（帖子强调版本一致）
+          # 帖子核心打包命令，添加-v参数输出详细日志
+          ../fmk/build-firmware.sh -v \
+            -s 4.0 \  # 匹配原固件Squashfs 4.0版本
             -o ../Modified_PandoraBox_K1_Original.bin
           
           cd ../
@@ -93,9 +94,11 @@ jobs:
           fi
           echo "✅ 新固件格式验证通过"
 
-      - name: 上传最终固件
+      - name: 上传最终固件+解包日志
         uses: actions/upload-artifact@v4
         with:
           name: PandoraBox_K1_FMK_Repacked
-          path: Modified_PandoraBox_K1_Original.bin
+          path: |
+            Modified_PandoraBox_K1_Original.bin
+            fmk_work/  # 上传解包目录，方便后续排错
           retention-days: 30
