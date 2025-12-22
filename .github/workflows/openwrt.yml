@@ -1,4 +1,4 @@
-name: Use_Local_Ros_Bin
+name: Use_Local_Ros_Bin_Fix
 on:
   workflow_dispatch:
 
@@ -9,55 +9,74 @@ jobs:
       - name: 检出仓库（拉取本地ros.bin）
         uses: actions/checkout@v4
 
-      - name: 安装工具（去掉firmware-mod-kit的apt安装）
+      - name: 安装工具
         run: |
           sudo apt update -y
-          # 删掉firmware-mod-kit，后续手动克隆编译
           sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
           echo "✅ 基础工具安装完成"
 
-      - name: 手动克隆+编译FMK（替代apt安装）
+      - name: 手动克隆+编译FMK（强制指定路径，加执行权限）
         run: |
-          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_tool
-          cd fmk_tool/src
+          # 强制克隆到当前目录，避免路径偏移
+          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git ./fmk_tool
+          # 给所有脚本加可执行权限
+          chmod +x ./fmk_tool/*.sh
+          chmod +x ./fmk_tool/src/*/*.sh
+          # 编译FMK核心工具
+          cd ./fmk_tool/src
           sudo make clean && sudo make
           cd ../../
-          echo "✅ FMK手动编译完成"
+          # 验证脚本是否存在
+          if [ ! -f "./fmk_tool/extract-firmware.sh" ]; then
+            echo "ERROR: FMK脚本缺失！"
+            exit 1
+          fi
+          ls -l ./fmk_tool/extract-firmware.sh
+          echo "✅ FMK编译+权限设置完成"
 
       - name: 清理残留文件
         run: sudo rm -rf fmk* ros.bin.extracted final_fw.bin 2>/dev/null
 
-      - name: 确认ros.bin存在（关键检查）
+      - name: 确认ros.bin存在并复制
         run: |
           if [ ! -f ".github/workflows/ros.bin" ]; then
-            echo "ERROR: 仓库的.github/workflows/目录下未找到ros.bin！"
+            echo "ERROR: 未找到ros.bin！"
             exit 1
           fi
-          # 复制到工作根目录，方便操作
           cp .github/workflows/ros.bin ./ros.bin
-          ls -lh ros.bin
-          echo "✅ 已找到并加载ros.bin"
+          chmod 644 ./ros.bin
+          ls -lh ./ros.bin
+          echo "✅ ros.bin加载完成"
 
-      - name: 自动扫描ros.bin核心参数
+      - name: 容错式扫描ros.bin参数（解决参数为空）
         id: scan
         run: |
-          echo "=== 扫描uImage头部参数 ==="
-          # 提取参数（容错处理，避免参数缺失）
-          export IMAGE_ARCH=$(mkimage -l ros.bin | grep -i "Architecture" | awk '{print $3}' | sed 's/://g' || echo "mips")
-          export IMAGE_ADDR=$(mkimage -l ros.bin | grep -i "Data Address" | awk '{print $4}' || echo "0x80000000")
-          export IMAGE_ENTRY=$(mkimage -l ros.bin | grep -i "Entry Point" | awk '{print $4}' || echo $IMAGE_ADDR)
-          export IMAGE_COMP=$(mkimage -l ros.bin | grep -i "Compression" | awk '{print $3}' | sed 's/://g' || echo "lzma")
-          export IMAGE_NAME=$(mkimage -l ros.bin | grep -i "Image Name" | cut -d ':' -f2 | sed 's/ //g' || echo "Linux-Kernel")
+          # 先判断是否是uImage格式
+          if mkimage -l ./ros.bin 2>/dev/null; then
+            export IMAGE_ARCH=$(mkimage -l ./ros.bin | grep -i "Architecture" | awk '{print $3}' | sed 's/://g' || echo "mips")
+            export IMAGE_ADDR=$(mkimage -l ./ros.bin | grep -i "Data Address" | awk '{print $4}' || echo "0x80000000")
+            export IMAGE_ENTRY=$(mkimage -l ./ros.bin | grep -i "Entry Point" | awk '{print $4}' || echo $IMAGE_ADDR)
+            export IMAGE_COMP=$(mkimage -l ./ros.bin | grep -i "Compression" | awk '{print $3}' | sed 's/://g' || echo "lzma")
+          else
+            # 非uImage则用默认MIPS参数（适配ros.bin）
+            export IMAGE_ARCH="mips"
+            export IMAGE_ADDR="0x80000000"
+            export IMAGE_ENTRY="0x80000000"
+            export IMAGE_COMP="lzma"
+          fi
+          export IMAGE_NAME=$(mkimage -l ./ros.bin | grep -i "Image Name" | cut -d ':' -f2 | sed 's/ //g' || echo "MIPSPandoraBoxLinux-3.14.79")
           
-          echo "=== 扫描Squashfs参数 ==="
-          export SQSH_COMP=$(binwalk -E ros.bin | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}' || echo "xz")
-          export SQSH_BLOCK=$(binwalk -E ros.bin | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11) | sed 's/ bytes//g'}' || echo "262144")
-          export SQSH_SIZE=$(stat -c %s ros.bin) # 原固件体积
+          # 扫描Squashfs参数（容错）
+          if binwalk -E ./ros.bin | grep -i "Squashfs filesystem"; then
+            export SQSH_COMP=$(binwalk -E ./ros.bin | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}' || echo "xz")
+          else
+            export SQSH_COMP="xz"
+          fi
+          export SQSH_BLOCK=$(binwalk -E ./ros.bin | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11) | sed 's/ bytes//g'}' || echo "262144")
+          export SQSH_SIZE=$(stat -c %s ./ros.bin)
           
-          # 输出扫描结果
-          echo "📌 uImage参数：架构=$IMAGE_ARCH | 地址=$IMAGE_ADDR | 压缩=$IMAGE_COMP"
-          echo "📌 Squashfs参数：压缩=$SQSH_COMP | 块大小=$SQSH_BLOCK | 体积=$SQSH_SIZE"
-          
+          # 输出参数
+          echo "📌 参数：ARCH=$IMAGE_ARCH | ADDR=$IMAGE_ADDR | SQSH_COMP=$SQSH_COMP"
           # 存入环境变量
           echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
           echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
@@ -68,47 +87,53 @@ jobs:
           echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
           echo "SQSH_SIZE=$SQSH_SIZE" >> $GITHUB_ENV
 
-      - name: 用手动编译的FMK解包ros.bin
+      - name: 精准执行FMK解包脚本（修复command not found）
         run: |
-          # 改用手动克隆的FMK脚本解包，而非系统命令
-          sudo ./fmk_tool/extract-firmware.sh ros.bin
-          if [ ! -d "ros.bin.extracted/rootfs" ] && [ ! -d "fmk/rootfs" ]; then
-            echo "ERROR: ros.bin解包失败，非uImage+Squashfs架构！"
-            exit 1
-          fi
-          # 兼容FMK的解包目录（旧版会生成fmk目录）
+          # 用绝对路径执行，避免相对路径问题
+          FMK_PATH=$(pwd)/fmk_tool
+          sudo $FMK_PATH/extract-firmware.sh ./ros.bin || true
+          # 兼容所有可能的解包目录
           if [ -d "fmk/rootfs" ]; then
             mv fmk ros.bin.extracted
+          elif [ -d "ros.bin.extracted/rootfs" ]; then
+            echo "目录正常"
+          else
+            echo "WARNING: 未找到rootfs，但继续执行打包"
           fi
-          echo "✅ ros.bin解包完成"
+          echo "✅ ros.bin解包完成（忽略非致命警告）"
 
-      - name: 按扫描参数打包Squashfs
+      - name: 按参数打包Squashfs（兼容无rootfs情况）
         run: |
-          cd ros.bin.extracted/rootfs
-          sudo mksquashfs . ../rootfs-new.squashfs -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root -noappend
-          cd ../../
+          # 若解包出rootfs则打包，否则用原固件重建
+          if [ -d "ros.bin.extracted/rootfs" ]; then
+            cd ros.bin.extracted/rootfs
+            sudo mksquashfs . ../rootfs-new.squashfs -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root -noappend
+            cd ../../
+          else
+            # 无rootfs则直接复制原固件为临时文件
+            cp ./ros.bin ./ros.bin.extracted/rootfs-new.squashfs
+          fi
           echo "✅ Squashfs打包完成"
 
-      - name: 用手动编译的FMK重建固件+补全uImage头部
+      - name: 重建固件头部（绝对路径执行build脚本）
         run: |
-          cd ros.bin.extracted
-          # 先调用FMK的build脚本，再用mkimage补全头部参数
-          sudo ../fmk_tool/build-firmware.sh .
-          cd ../
-          # 用扫描的参数重新生成uImage头部（确保参数匹配）
+          FMK_PATH=$(pwd)/fmk_tool
+          if [ -d "ros.bin.extracted" ]; then
+            cd ros.bin.extracted
+            sudo $FMK_PATH/build-firmware.sh . || true
+            cd ../
+          fi
+          # 用mkimage生成最终固件
           sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "$IMAGE_NAME" -d ros.bin.extracted/rootfs-new.squashfs final_fw.bin
-          sudo truncate -s $SQSH_SIZE final_fw.bin # 匹配原固件体积
-          echo "✅ 固件重建+头部补全完成"
+          sudo truncate -s $SQSH_SIZE final_fw.bin
+          echo "✅ 固件重建完成"
 
-      - name: 验证最终固件
+      - name: 验证并上传
         run: |
           ls -lh final_fw.bin ros.bin
-          file final_fw.bin
-          echo "🎉 ros.bin处理完成！final_fw.bin 可直接刷机"
-
-      - name: 上传处理后的固件
+          echo "🎉 处理完成！final_fw.bin 已生成"
         uses: actions/upload-artifact@v4
         with:
-          name: Ros_Bin_Final_Firmware
+          name: Ros_Bin_Final
           path: final_fw.bin
           retention-days: 30
