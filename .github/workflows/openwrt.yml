@@ -53,16 +53,16 @@ jobs:
       - name: 自动打包（仅保留支持的选项，无报错）
         run: |
           cd ros.extracted/rootfs
-          # 仅使用工具明确支持的选项：-b（块大小）、-comp（压缩）、-no-xattrs、-all-root
           sudo mksquashfs . ../rootfs.sqsh -b 262144 -comp xz -no-xattrs -all-root
           cd ../../
 
       - name: 自动重建启动头部
         run: sudo mkimage -A mips -O linux -T kernel -C lzma -a 0x80000000 -e 0x80000000 -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
 
-      - name: 自动上传固件
+      - name: 直接上传BIN文件（不压缩）
         uses: actions/upload-artifact@v4
         with:
-          name: Auto_Trigger_Working_Firmware
+          name: Auto_Trigger_Working_Firmware # 下载后的文件名（无后缀）
           path: final_fw.bin
           retention-days: 30
+          archive: false # 关键！禁用ZIP压缩，直接上传BIN文件
