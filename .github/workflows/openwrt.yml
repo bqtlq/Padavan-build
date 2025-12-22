@@ -13,8 +13,8 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装必需工具（含分区提取依赖）
-        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget flex bison libssl-dev ddrescue
+      - name: 安装必需工具（修复ddrescue依赖包名）
+        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget flex bison libssl-dev gddrescue
 
       - name: 彻底清理残留
         run: sudo rm -rf fmk* fmk_ros_only* ros.extracted ros.bin.extracted final_fw.bin art_partition.bin 2>/dev/null
@@ -35,7 +35,6 @@ jobs:
           if [ -f "$FW_PATH" ]; then
             cp $FW_PATH ./$FW_FILE
             echo "✅ 成功找到并复制固件：$FW_PATH"
-            # 记录原始固件大小（用于参考）
             ORIG_FW_SIZE=$(stat -c %s $FW_FILE)
             echo "原始固件大小：$ORIG_FW_SIZE 字节（约$((ORIG_FW_SIZE/1024/1024))MB）"
           else
@@ -45,7 +44,6 @@ jobs:
 
       - name: 提取ART无线校准分区（关键！避免文件缺失）
         run: |
-          # 扫描ART分区（潘多拉固件ART分区标识：ART/ath9k/calibration）
           ART_INFO=$(binwalk $FW_FILE | grep -iE "ART|ath9k|calibration" | tail -1)
           if [ -n "$ART_INFO" ]; then
             ART_OFFSET=$(echo $ART_INFO | awk '{print $1}' | sed 's/0x//')
@@ -53,7 +51,6 @@ jobs:
             echo "📌 找到ART分区：偏移量0x$ART_OFFSET，大小$ART_SIZE 字节"
             sudo dd if=$FW_FILE of=art_partition.bin bs=1 skip=$ART_OFFSET count=$ART_SIZE 2>/dev/null
           else
-            # 兜底：按潘多拉常见ART大小（64KB）提取末尾
             ART_SIZE=65536
             ART_OFFSET=$((ORIG_FW_SIZE - ART_SIZE))
             echo "⚠️  未扫描到ART分区，按默认64KB提取末尾"
@@ -81,7 +78,6 @@ jobs:
           fi
           set -e
 
-          # 扫描Squashfs参数
           if binwalk $FW_FILE | grep -i "Squashfs filesystem" 2>/dev/null; then
             SQSH_COMP_LINE=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | grep -i "compression")
             SQSH_COMP=$(echo $SQSH_COMP_LINE | sed -r 's/.*compression: *([a-z0-9]+).*/\1/' | tr -d ' ' || echo "xz")
@@ -89,7 +85,6 @@ jobs:
             SQSH_BLOCK=$(echo $SQSH_BLOCK_LINE | sed -r 's/.*blocksize: *([0-9]+).*/\1/' | tr -d ' ' || echo "262144")
           fi
 
-          # 架构校验
           VALID_ARCHES=("mips" "arm" "x86" "mips64" "arm64" "x86_64")
           [[ ! " ${VALID_ARCHES[@]} " =~ " ${IMAGE_ARCH} " ]] && IMAGE_ARCH="mips"
 
@@ -124,9 +119,7 @@ jobs:
 
       - name: 重建完整固件（内核 + ART分区）
         run: |
-          # 生成内核镜像
           sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "PandoraBox_ROS" -d ros.extracted/rootfs.sqsh kernel.bin
-          # 直接合并内核和ART分区（无冗余填充）
           sudo cat kernel.bin art_partition.bin > final_fw.bin
           rm kernel.bin
 
