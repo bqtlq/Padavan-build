@@ -1,6 +1,6 @@
 name: 自动下载+解包删除PPPoE+打包PandoraBox固件（MT7620-K1专用）
 on:
-  workflow_dispatch:  # 手动触发（推荐）
+  workflow_dispatch:
   push:
     paths:
       - '.github/workflows/openwrt.yml'
@@ -16,34 +16,27 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file wget
-          # 验证工具
           echo "=== 工具版本验证 ==="
           mksquashfs -version | head -n1
           unsquashfs -version | head -n1
           wget --version | head -n1
 
-      ###########################################################################
-      # 自动下载固件（修复格式检测）
-      ###########################################################################
       - name: 自动下载潘多拉K1固件
         run: |
           echo "=== 开始下载固件 ==="
-          # 从官方地址下载固件，并重命名为PandoraBox.bin
           wget -O PandoraBox.bin \
             http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin \
             --timeout=30 \
             --tries=3 || { echo "ERROR: 固件下载失败"; exit 1; }
           
-          # 验证下载的固件有效性（大小需在6-8MB左右）
           echo "=== 下载的固件信息 ==="
           ls -lh PandoraBox.bin
           FILE_SIZE=$(stat -c%s "PandoraBox.bin")
-          if [ $FILE_SIZE -lt 6000000 ]; then  # 小于6MB则判定为下载失败
+          if [ $FILE_SIZE -lt 6000000 ]; then
             echo "ERROR: 固件文件过小，下载不完整（大小：$FILE_SIZE 字节）"
             exit 1
           fi
           
-          # 修复格式检测：匹配"uImage"关键词（兼容u-boot legacy uImage格式）
           file PandoraBox.bin
           if ! file PandoraBox.bin | grep -q "uImage"; then
             echo "ERROR: 下载的固件不是uImage格式！"
@@ -51,7 +44,7 @@ jobs:
           fi
           echo "✅ 固件下载并验证成功"
 
-      - name: 精准解包uImage格式固件
+      - name: 精准解包uImage格式固件（修复设备文件权限问题）
         run: |
           mkdir -p firmware_split rootfs
           echo "=== 开始精准解包 ==="
@@ -59,11 +52,9 @@ jobs:
           UIMAGE_HEADER_SIZE=64
           SQUASHFS_OFFSET=$((0x162FAA))
           
-          # 分离uImage头部
           dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=$UIMAGE_HEADER_SIZE 2>/dev/null
           echo "✅ 已分离uImage头部（$UIMAGE_HEADER_SIZE字节）"
           
-          # 提取Squashfs镜像
           dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
           if ! file firmware_split/rootfs.squashfs | grep -q "Squashfs filesystem"; then
             echo "ERROR: Squashfs镜像无效！"
@@ -72,8 +63,8 @@ jobs:
           fi
           echo "✅ Squashfs镜像验证有效"
           
-          # 解包Squashfs
-          unsquashfs -d rootfs firmware_split/rootfs.squashfs || { echo "ERROR: 解包失败"; exit 1; }
+          # 核心修复：添加-n参数跳过设备文件创建，避免权限错误
+          unsquashfs -n -d rootfs firmware_split/rootfs.squashfs || { echo "ERROR: 解包失败"; exit 1; }
           echo "✅ Squashfs解包完成"
           ls -l rootfs/ | head -n10
 
@@ -82,16 +73,12 @@ jobs:
           cd rootfs || { echo "ERROR: 进入根目录失败"; exit 1; }
           echo "=== 开始删除PPPoE组件 ==="
           
-          # 删除二进制文件
           rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe* ./usr/sbin/pppd* 2>/dev/null || true
-          # 删除配置与脚本
           rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe 2>/dev/null || true
-          # 删除包信息
           rm -rf ./usr/lib/opkg/info/pppoe* ./usr/lib/opkg/info/ppp-mod-pppoe* 2>/dev/null || true
-          # 清理opkg状态
           sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
           sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          # 清理残留
+          
           残留文件=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
           if [ -n "$残留文件" ]; then
             find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/null || true
