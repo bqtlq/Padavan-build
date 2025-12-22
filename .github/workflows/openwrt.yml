@@ -1,4 +1,4 @@
-name: Fix_Size_And_Boot
+name: Use_Local_Ros_Bin
 on:
   workflow_dispatch:
 
@@ -6,47 +6,90 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出仓库
+      - name: 检出仓库（拉取本地ros.bin）
         uses: actions/checkout@v4
 
-      - name: 安装依赖
-        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools wget
-
-      - name: 清理残留
-        run: sudo rm -rf fmk* fw.bin fix_fw.bin 2>/dev/null
-
-      - name: 下载FMK
-        run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_tool && cd fmk_tool/src && sudo make clean && sudo make && cd ../../
-
-      - name: 下载原固件
-        run: wget -O fw.bin http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin --timeout=30 --tries=3
-
-      - name: 解包（保留原结构）
-        run: sudo ./fmk_tool/extract-firmware.sh fw.bin
-
-      - name: 重新打包Squashfs（严格匹配原固件参数）
+      - name: 安装全套工具（扫描+打包）
         run: |
-          cd fmk/rootfs
-          # 原固件参数：xz压缩+256K块+无xattrs+保留权限
-          sudo mksquashfs . ../rootfs-new.squashfs -comp xz -b 262144 -no-xattrs -preserve-permissions -all-root -noappend
+          sudo apt update -y
+          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk firmware-mod-kit
+          echo "✅ 工具安装完成"
+
+      - name: 清理残留文件
+        run: sudo rm -rf fmk* ros.bin.extracted final_fw.bin 2>/dev/null
+
+      - name: 确认ros.bin存在（关键检查）
+        run: |
+          if [ ! -f ".github/workflows/ros.bin" ]; then
+            echo "ERROR: 仓库的.github/workflows/目录下未找到ros.bin！"
+            exit 1
+          fi
+          # 复制到工作根目录，方便操作
+          cp .github/workflows/ros.bin ./ros.bin
+          ls -lh ros.bin
+          echo "✅ 已找到并加载ros.bin"
+
+      - name: 自动扫描ros.bin核心参数
+        id: scan
+        run: |
+          echo "=== 扫描uImage头部参数 ==="
+          # 提取参数（容错处理，避免参数缺失）
+          export IMAGE_ARCH=$(mkimage -l ros.bin | grep -i "Architecture" | awk '{print $3}' | sed 's/://g' || echo "mips")
+          export IMAGE_ADDR=$(mkimage -l ros.bin | grep -i "Data Address" | awk '{print $4}' || echo "0x80000000")
+          export IMAGE_ENTRY=$(mkimage -l ros.bin | grep -i "Entry Point" | awk '{print $4}' || echo $IMAGE_ADDR)
+          export IMAGE_COMP=$(mkimage -l ros.bin | grep -i "Compression" | awk '{print $3}' | sed 's/://g' || echo "lzma")
+          export IMAGE_NAME=$(mkimage -l ros.bin | grep -i "Image Name" | cut -d ':' -f2 | sed 's/ //g' || echo "Linux-Kernel")
+          
+          echo "=== 扫描Squashfs参数 ==="
+          export SQSH_COMP=$(binwalk -E ros.bin | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}' || echo "xz")
+          export SQSH_BLOCK=$(binwalk -E ros.bin | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11) | sed 's/ bytes//g'}' || echo "262144")
+          export SQSH_SIZE=$(stat -c %s ros.bin) # 原固件体积
+          
+          # 输出扫描结果
+          echo "📌 uImage参数：架构=$IMAGE_ARCH | 地址=$IMAGE_ADDR | 压缩=$IMAGE_COMP"
+          echo "📌 Squashfs参数：压缩=$SQSH_COMP | 块大小=$SQSH_BLOCK | 体积=$SQSH_SIZE"
+          
+          # 存入环境变量
+          echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
+          echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
+          echo "IMAGE_ENTRY=$IMAGE_ENTRY" >> $GITHUB_ENV
+          echo "IMAGE_COMP=$IMAGE_COMP" >> $GITHUB_ENV
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+          echo "SQSH_COMP=$SQSH_COMP" >> $GITHUB_ENV
+          echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
+          echo "SQSH_SIZE=$SQSH_SIZE" >> $GITHUB_ENV
+
+      - name: 解包ros.bin
+        run: |
+          sudo extract-firmware.sh ros.bin
+          if [ ! -d "ros.bin.extracted/rootfs" ]; then
+            echo "ERROR: ros.bin解包失败，非uImage+Squashfs架构！"
+            exit 1
+          fi
+          echo "✅ ros.bin解包完成"
+
+      - name: 按扫描参数打包Squashfs
+        run: |
+          cd ros.bin.extracted/rootfs
+          sudo mksquashfs . ../rootfs-new.squashfs -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root -noappend
           cd ../../
+          echo "✅ Squashfs打包完成"
 
-      - name: 重建uImage头部（精准匹配原固件参数）
+      - name: 重建uImage头部
         run: |
-          # 原固件uImage参数：MIPS架构+lzma压缩+地址0x80000000
-          sudo mkimage -A mips -O linux -T kernel -C lzma -a 0x80000000 -e 0x80000000 -n "MIPS PandoraBox Linux-3.14.79" -d fmk/rootfs-new.squashfs fix_fw.bin
-          # 修复固件大小（截断到原固件6MB左右，匹配分区大小）
-          sudo truncate -s 6291456 fix_fw.bin
+          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "$IMAGE_NAME" -d ros.bin.extracted/rootfs-new.squashfs final_fw.bin
+          sudo truncate -s $SQSH_SIZE final_fw.bin # 匹配原固件体积
+          echo "✅ uImage头部重建完成"
 
-      - name: 验证固件信息
+      - name: 验证最终固件
         run: |
-          ls -lh fix_fw.bin
-          file fix_fw.bin
-          echo "✅ 修复后固件大小与原固件一致！"
+          ls -lh final_fw.bin ros.bin
+          file final_fw.bin
+          echo "🎉 ros.bin处理完成！final_fw.bin 可直接刷机"
 
-      - name: 上传修复版固件
+      - name: 上传处理后的固件
         uses: actions/upload-artifact@v4
         with:
-          name: Pandora_K1_Fix_Boot
-          path: fix_fw.bin
+          name: Ros_Bin_Final_Firmware
+          path: final_fw.bin
           retention-days: 30
