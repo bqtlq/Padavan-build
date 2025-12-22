@@ -52,11 +52,9 @@ jobs:
           UIMAGE_HEADER_SIZE=64
           SQUASHFS_OFFSET=$((0x162FAA))
           
-          # 分离uImage头部
           dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=$UIMAGE_HEADER_SIZE 2>/dev/null
           echo "✅ 已分离uImage头部（$UIMAGE_HEADER_SIZE字节）"
           
-          # 提取Squashfs镜像
           dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
           if ! file firmware_split/rootfs.squashfs | grep -q "Squashfs filesystem"; then
             echo "ERROR: Squashfs镜像无效！"
@@ -65,10 +63,8 @@ jobs:
           fi
           echo "✅ Squashfs镜像验证有效"
           
-          # 最终修复：忽略设备文件导致的非零退出码，用后续验证替代强制退出
           unsquashfs -n -d rootfs firmware_split/rootfs.squashfs || true
           
-          # 关键验证：检查核心目录是否存在（确认解包真成功）
           if [ ! -d "rootfs/etc" ] || [ ! -d "rootfs/usr" ]; then
             echo "ERROR: 解包失败，核心目录（etc/usr）不存在！"
             ls -l rootfs/
@@ -78,7 +74,7 @@ jobs:
           echo "✅ Squashfs解包完成（已跳过设备文件创建）"
           ls -l rootfs/ | head -n10
 
-      - name: 彻底删除PPPoE组件
+      - name: 彻底删除PPPoE组件（修复中文变量名）
         run: |
           cd rootfs || { echo "ERROR: 进入根目录失败"; exit 1; }
           echo "=== 开始删除PPPoE组件 ==="
@@ -92,11 +88,11 @@ jobs:
           # 清理opkg状态
           sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
           sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          # 清理残留
-          残留文件=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
-          if [ -n "$残留文件" ]; then
+          # 修复：中文变量名改为英文（RESIDUAL_FILES）
+          RESIDUAL_FILES=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
+          if [ -n "$RESIDUAL_FILES" ]; then
             find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/null || true
-            echo "✅ 删除残留文件：$残留文件"
+            echo "✅ 删除残留文件：$RESIDUAL_FILES"
           else
             echo "✅ 无PPPoE残留文件"
           fi
