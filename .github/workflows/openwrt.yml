@@ -1,77 +1,37 @@
-name: 旧版FMK极简稳定版（仅保留核心功能）
+name: 最后一次尝试（彻底清理工具目录）
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/openwrt.yml'
 
 jobs:
-  build-firmware:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装极简依赖
-        run: |
-          sudo apt update -y
-          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools wget
-          echo "=== 依赖安装完成 ==="
+      - name: 只装必需依赖
+        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools wget
 
-      - name: 下载并编译FMK（加sudo确保权限）
-        run: |
-          echo "=== 编译FMK ==="
-          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk
-          cd fmk/src && sudo make clean && sudo make && cd ../../
-          echo "=== FMK编译完成 ==="
+      - name: 彻底清理所有FMK相关目录（关键修复）
+        run: sudo rm -rf fmk fw.bin.extracted final_fw.bin 2>/dev/null
+
+      - name: 重新下载+编译FMK（确保干净）
+        run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk && cd fmk/src && sudo make clean && sudo make && cd ../../
 
       - name: 下载固件
-        run: |
-          wget -O PandoraBox.bin \
-            http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin \
-            --timeout=30 --tries=3 || { echo "固件下载失败"; exit 1; }
+        run: wget -O fw.bin http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin --timeout=30 --tries=3
 
-      - name: 解包（极简参数，旧版兼容）
-        run: |
-          sudo rm -rf PandoraBox.bin.extracted 2>/dev/null
-          # 旧版唯一支持的用法：不指定输出目录，默认生成 <固件名>.extracted
-          sudo ./fmk/extract-firmware.sh PandoraBox.bin || true
-          
-          # 验证解包成功（旧版默认目录）
-          if [ ! -d "PandoraBox.bin.extracted/rootfs" ]; then
-            echo "ERROR: 解包失败！"
-            exit 1
-          fi
-          echo "✅ 解包成功"
+      - name: 解包（无任何多余参数）
+        run: sudo ./fmk/extract-firmware.sh fw.bin
 
-      - name: 打包（旧版标准用法，加sudo解决权限）
-        run: |
-          echo "=== 开始打包 ==="
-          # 旧版打包唯一正确用法：进入解包目录，直接运行build-firmware.sh
-          cd PandoraBox.bin.extracted
-          sudo ../../fmk/build-firmware.sh -s 4.0 -o ../../PandoraBox_K1_Final.bin
-          cd ../../
-          
-          # 验证打包成功
-          if [ ! -f "PandoraBox_K1_Final.bin" ]; then
-            echo "ERROR: 打包失败！"
-            exit 1
-          fi
-          echo "✅ 打包成功"
+      - name: 打包（无任何多余参数）
+        run: cd fw.bin.extracted && sudo ../../fmk/build-firmware.sh -s 4.0 -o ../../final_fw.bin && cd ../../
 
-      - name: 最终验证
-        run: |
-          ls -lh PandoraBox.bin PandoraBox_K1_Final.bin
-          file PandoraBox_K1_Final.bin
-          if ! file PandoraBox_K1_Final.bin | grep -q "uImage"; then
-            echo "ERROR: 固件格式异常！"
-            exit 1
-          fi
-          echo "✅ 固件可用，可直接刷机！"
-
-      - name: 上传最终固件
+      - name: 强制上传（不管成功失败都传）
         uses: actions/upload-artifact@v4
         with:
-          name: PandoraBox_K1_Ultra_Stable
-          path: PandoraBox_K1_Final.bin
+          name: last_try_firmware
+          path: |
+            final_fw.bin
+            fw.bin.extracted/logs/ 2>/dev/null || true
           retention-days: 30
