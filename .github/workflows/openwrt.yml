@@ -1,115 +1,97 @@
-name: 精准解包删除PPPoE并重新打包PandoraBox固件（MT7620-K1专用）
+name: 自动下载+解包删除PPPoE+打包PandoraBox固件（MT7620-K1专用）
 on:
   workflow_dispatch:  # 手动触发（推荐）
   push:
     paths:
-      - '.github/workflows/openwrt.yml'  # 仅修改此文件时触发推送
+      - '.github/workflows/openwrt.yml'
 
 jobs:
   modify-firmware:
     runs-on: ubuntu-latest
     steps:
-      ###########################################################################
-      # 1. 检出仓库代码
-      ###########################################################################
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      ###########################################################################
-      # 2. 安装依赖工具（已验证兼容）
-      ###########################################################################
       - name: 安装核心依赖工具
         run: |
           sudo apt update -y
-          sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file
-          # 验证工具安装成功（输出版本号，确保可用）
+          sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file wget
+          # 验证工具
           echo "=== 工具版本验证 ==="
           mksquashfs -version | head -n1
           unsquashfs -version | head -n1
-          binwalk -v | head -n1
-          file --version | head -n1
+          wget --version | head -n1
 
       ###########################################################################
-      # 3. 加载固件并验证存在性（适配PandoraBox.bin文件名）
+      # 核心修改：自动下载固件，替代手动上传
       ###########################################################################
-      - name: 加载PandoraBox固件（适配实际文件名）
+      - name: 自动下载潘多拉K1固件
         run: |
-          # 固件路径：匹配你仓库中的PandoraBox.bin
-          FIRMWARE_PATH=".github/workflows/PandoraBox.bin"
-          cp "$FIRMWARE_PATH" ./PandoraBox.bin || { echo "ERROR: 固件文件不存在！请检查路径是否为$FIRMWARE_PATH"; exit 1; }
+          echo "=== 开始下载固件 ==="
+          # 从官方地址下载固件，并重命名为PandoraBox.bin
+          wget -O PandoraBox.bin \
+            http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin \
+            --timeout=30 \
+            --tries=3 || { echo "ERROR: 固件下载失败"; exit 1; }
           
-          # 验证固件文件大小和格式
-          echo "=== 固件信息 ==="
-          ls -lh ./PandoraBox.bin
-          file ./PandoraBox.bin  # 应输出"uImage header"，确认格式正确
-          if ! file ./PandoraBox.bin | grep -q "uImage header"; then
-            echo "ERROR: 固件不是uImage格式，与偏移配置不匹配！"
+          # 验证下载的固件有效性（大小需在6-8MB左右，避免下载残缺文件）
+          echo "=== 下载的固件信息 ==="
+          ls -lh PandoraBox.bin
+          FILE_SIZE=$(stat -c%s "PandoraBox.bin")
+          if [ $FILE_SIZE -lt 6000000 ]; then  # 小于6MB则判定为下载失败
+            echo "ERROR: 固件文件过小，下载不完整（大小：$FILE_SIZE 字节）"
             exit 1
           fi
+          
+          # 检测固件格式
+          file PandoraBox.bin
+          if ! file PandoraBox.bin | grep -q "uImage header"; then
+            echo "ERROR: 下载的固件不是uImage格式！"
+            exit 1
+          fi
+          echo "✅ 固件下载并验证成功"
 
-      ###########################################################################
-      # 4. 精准解包固件（基于binwalk获取的偏移，核心步骤）
-      ###########################################################################
       - name: 精准解包uImage格式固件
         run: |
-          mkdir -p firmware_split rootfs  # 创建工作目录
+          mkdir -p firmware_split rootfs
           echo "=== 开始精准解包 ==="
           
-          # 关键参数：从binwalk结果获取，适配K1机型固件
-          UIMAGE_HEADER_SIZE=64          # 0x0开始，uImage头部大小（binwalk显示header size: 64 bytes）
-          SQUASHFS_OFFSET=$((0x162FAA))  # Squashfs文件系统起始偏移（binwalk显示0x162FAA）
+          UIMAGE_HEADER_SIZE=64
+          SQUASHFS_OFFSET=$((0x162FAA))
           
-          # 步骤1：分离uImage头部（必须保留，路由器识别固件的关键）
+          # 分离uImage头部
           dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=$UIMAGE_HEADER_SIZE 2>/dev/null
           echo "✅ 已分离uImage头部（$UIMAGE_HEADER_SIZE字节）"
           
-          # 步骤2：提取纯Squashfs根文件系统（跳过头部和内核，直接定位到文件系统）
+          # 提取Squashfs镜像
           dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
-          echo "✅ 已提取Squashfs镜像（偏移0x$((SQUASHFS_OFFSET))）"
-          
-          # 步骤3：验证Squashfs镜像有效性（避免偏移错误导致解包失败）
           if ! file firmware_split/rootfs.squashfs | grep -q "Squashfs filesystem"; then
-            echo "ERROR: 提取的Squashfs镜像无效！请检查偏移是否正确"
+            echo "ERROR: Squashfs镜像无效！"
             file firmware_split/rootfs.squashfs
             exit 1
           fi
           echo "✅ Squashfs镜像验证有效"
           
-          # 步骤4：解包Squashfs到rootfs目录（后续删除插件用）
-          unsquashfs -d rootfs firmware_split/rootfs.squashfs || { echo "ERROR: Squashfs解包失败"; exit 1; }
-          echo "✅ Squashfs解包完成，根文件系统目录：rootfs/"
-          ls -l rootfs/ | head -n10  # 输出前10个文件，确认解包成功
+          # 解包Squashfs
+          unsquashfs -d rootfs firmware_split/rootfs.squashfs || { echo "ERROR: 解包失败"; exit 1; }
+          echo "✅ Squashfs解包完成"
+          ls -l rootfs/ | head -n10
 
-      ###########################################################################
-      # 5. 彻底删除PPPoE相关组件（容错处理，不遗漏）
-      ###########################################################################
       - name: 彻底删除PPPoE组件
         run: |
-          cd rootfs || { echo "ERROR: 进入根文件系统目录失败"; exit 1; }
+          cd rootfs || { echo "ERROR: 进入根目录失败"; exit 1; }
           echo "=== 开始删除PPPoE组件 ==="
           
-          # 5.1 删除PPPoE二进制执行文件
+          # 删除二进制文件
           rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe* ./usr/sbin/pppd* 2>/dev/null || true
-          echo "✅ 删除PPPoE二进制文件"
-          
-          # 5.2 删除PPPoE配置文件、启动脚本、拨号脚本
-          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe ./etc/ppp/pppoe.conf 2>/dev/null || true
-          rm -f ./etc/ppp/options.pppoe ./etc/hotplug.d/net/*pppoe* 2>/dev/null || true
-          echo "✅ 删除PPPoE配置与启动脚本"
-          
-          # 5.3 删除PPPoE相关库文件和opkg包信息
+          # 删除配置与脚本
+          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe 2>/dev/null || true
+          # 删除包信息
           rm -rf ./usr/lib/opkg/info/pppoe* ./usr/lib/opkg/info/ppp-mod-pppoe* 2>/dev/null || true
-          rm -f ./usr/lib/libpppoe* 2>/dev/null || true
-          echo "✅ 删除PPPoE库文件与包信息"
-          
-          # 5.4 清理opkg状态记录（避免系统识别残留）
+          # 清理opkg状态
           sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
           sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          sed -i '/Package: pppd/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          echo "✅ 清理opkg状态记录"
-          
-          # 5.5 查找并删除所有残留文件（确保无遗漏）
-          echo "=== 查找残留PPPoE文件 ==="
+          # 清理残留
           残留文件=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
           if [ -n "$残留文件" ]; then
             find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/null || true
@@ -117,63 +99,38 @@ jobs:
           else
             echo "✅ 无PPPoE残留文件"
           fi
-          
           cd ../
-          echo "=== PPPoE组件删除完成 ==="
 
-      ###########################################################################
-      # 6. 重新打包Squashfs根文件系统（匹配原固件参数）
-      ###########################################################################
-      - name: 重新打包Squashfs镜像（适配原固件格式）
+      - name: 重新打包Squashfs镜像
         run: |
-          echo "=== 开始重新打包Squashfs ==="
-          
-          # 关键参数：与原固件完全一致（binwalk显示：xz压缩、blocksize: 262144 bytes）
+          echo "=== 开始重新打包 ==="
           mksquashfs rootfs/ firmware_split/new_rootfs.squashfs \
-            -comp xz \                  # 压缩算法：xz（原固件一致）
-            -b 262144 \                 # 块大小：256K（原固件一致）
-            -noappend \                 # 不追加模式（避免镜像冗余）
-            -all-root \                 # 所有文件权限为root（避免权限错误）
-            -processors 2               # 多线程加速（适配GitHub Actions环境）
+            -comp xz -b 262144 -noappend -all-root -processors 2
           
-          # 验证新镜像
           if [ ! -f "firmware_split/new_rootfs.squashfs" ]; then
-            echo "ERROR: Squashfs重新打包失败"
+            echo "ERROR: 打包失败"
             exit 1
           fi
-          echo "✅ Squashfs重新打包完成，新镜像大小：$(ls -lh firmware_split/new_rootfs.squashfs | awk '{print $5}')"
+          echo "✅ Squashfs打包完成，大小：$(ls -lh firmware_split/new_rootfs.squashfs | awk '{print $5}')"
 
-      ###########################################################################
-      # 7. 合并生成可刷机固件（保留uImage头部，关键步骤）
-      ###########################################################################
-      - name: 合并uImage头部与新根文件系统
+      - name: 合并生成可刷机固件
         run: |
-          echo "=== 开始合并固件 ==="
-          
-          # 合并顺序：uImage头部 + 新Squashfs镜像（必须按此顺序，否则路由器无法识别）
+          echo "=== 合并固件 ==="
           cat firmware_split/uimage_header.bin firmware_split/new_rootfs.squashfs > Modified_PandoraBox_K1_NoPPPoE.bin
           
-          # 验证最终固件
           if [ ! -f "Modified_PandoraBox_K1_NoPPPoE.bin" ]; then
-            echo "ERROR: 固件合并失败"
+            echo "ERROR: 合并失败"
             exit 1
           fi
           
           echo "=== 最终固件信息 ==="
           ls -lh Modified_PandoraBox_K1_NoPPPoE.bin
-          file Modified_PandoraBox_K1_NoPPPoE.bin  # 应输出"uImage header"，确认格式正确
-          binwalk -x none Modified_PandoraBox_K1_NoPPPoE.bin | head -n10  # 验证结构正常
-          
-          echo "✅ 可刷机固件生成完成！文件名：Modified_PandoraBox_K1_NoPPPoE.bin"
+          file Modified_PandoraBox_K1_NoPPPoE.bin
+          echo "✅ 可刷机固件生成完成！"
 
-      ###########################################################################
-      # 8. 上传产物（固件+调试日志，方便排错）
-      ###########################################################################
-      - name: 上传最终固件和调试日志
+      - name: 上传最终固件
         uses: actions/upload-artifact@v4
         with:
           name: PandoraBox_K1_NoPPPoE_Firmware
-          path: |
-            Modified_PandoraBox_K1_NoPPPoE.bin  # 最终可刷机固件
-            firmware_split/                     # 中间产物（排错用）
-          retention-days: 90  # 产物保留90天（足够刷机测试）
+          path: Modified_PandoraBox_K1_NoPPPoE.bin
+          retention-days: 90
