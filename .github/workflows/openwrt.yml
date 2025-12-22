@@ -1,21 +1,21 @@
 name: Ros_Bin_Auto_Trigger
-# 改为自动触发：提交代码到main分支时运行
 on:
-   workflow_dispatch:
-   push:
-     paths:
-       - '.github/workflows/openwrt.yml'
+  workflow_dispatch: # 保留手动触发（备用）
+  push:
+    paths:
+      - '.github/workflows/openwrt.yml' # 仅修改该文件时自动触发
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出仓库（自动拉取最新代码）
+      - name: 检出仓库
         uses: actions/checkout@v4
 
       - name: 安装必需工具
         run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
 
-      - name: 彻底清理残留（避免冲突）
+      - name: 彻底清理残留
         run: sudo rm -rf fmk* fmk_ros_only* ros.extracted ros.bin.extracted final_fw.bin 2>/dev/null
 
       - name: 克隆FMK（唯一目录名）
@@ -30,7 +30,7 @@ jobs:
             exit 1
           fi
 
-      - name: 固定参数（避免为空，确保打包成功）
+      - name: 固定参数（避免为空）
         run: |
           echo "IMAGE_ARCH=mips" >> $GITHUB_ENV
           echo "IMAGE_ADDR=0x80000000" >> $GITHUB_ENV
@@ -50,10 +50,11 @@ jobs:
             exit 1
           fi
 
-      - name: 自动打包（固定参数，无报错）
+      - name: 自动打包（修正参数顺序，无报错）
         run: |
           cd ros.extracted/rootfs
-          sudo mksquashfs . ../rootfs.sqsh -comp xz -b 262144 -no-xattrs -preserve-permissions -all-root
+          # 正确语法：mksquashfs 源目录 输出文件 -选项1 -选项2 ...
+          sudo mksquashfs . ../rootfs.sqsh -b 262144 -comp xz -no-xattrs -preserve-permissions -all-root
           cd ../../
 
       - name: 自动重建启动头部
