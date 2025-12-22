@@ -23,7 +23,7 @@ jobs:
           wget --version | head -n1
 
       ###########################################################################
-      # 核心修改：自动下载固件，替代手动上传
+      # 自动下载固件（修复格式检测）
       ###########################################################################
       - name: 自动下载潘多拉K1固件
         run: |
@@ -34,7 +34,7 @@ jobs:
             --timeout=30 \
             --tries=3 || { echo "ERROR: 固件下载失败"; exit 1; }
           
-          # 验证下载的固件有效性（大小需在6-8MB左右，避免下载残缺文件）
+          # 验证下载的固件有效性（大小需在6-8MB左右）
           echo "=== 下载的固件信息 ==="
           ls -lh PandoraBox.bin
           FILE_SIZE=$(stat -c%s "PandoraBox.bin")
@@ -43,9 +43,9 @@ jobs:
             exit 1
           fi
           
-          # 检测固件格式
+          # 修复格式检测：匹配"uImage"关键词（兼容u-boot legacy uImage格式）
           file PandoraBox.bin
-          if ! file PandoraBox.bin | grep -q "uImage header"; then
+          if ! file PandoraBox.bin | grep -q "uImage"; then
             echo "ERROR: 下载的固件不是uImage格式！"
             exit 1
           fi
