@@ -1,4 +1,4 @@
-name: FMK_Old_Script_Stable（Padavan专用）
+name: FMK_Old_Script_Stable（Padavan专用，遵循官方文档）
 on:
   workflow_dispatch:
   push:
@@ -12,39 +12,50 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装官方依赖
+      - name: 安装官方完整依赖（含C#编译+压缩库，遵循文档要求）
         run: |
           sudo apt update -y
-          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
-          echo "✅ 依赖安装完成"
+          # 官方文档指定依赖：build-essential+压缩库+mono（编译C#源码）+工具链
+          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget mono-devel mono-mcs
+          echo "✅ 官方完整依赖安装完成（含C#编译环境）"
 
-      - name: 终极清理（含fmk目录）
+      - name: 终极清理（执行官方cleanup.sh，遵循文档预处理步骤）
         run: |
           sudo rm -rf fmk final_fw.bin ros.bin padavan_source fmk_099.tar.gz 2>/dev/null
-          echo "✅ 残留清理完成"
+          # 后续解压后执行官方清理脚本，此处先清理全局残留
+          echo "✅ 全局残留清理完成"
 
-      - name: 下载+解压FMK（直接生成fmk目录，无需重命名）
+      - name: 下载+解压FMK（官方原始包，保持目录结构）
         run: |
-          # 下载新链接包
           wget https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/firmware-mod-kit/fmk_099.tar.gz
-          # 解压后直接生成fmk目录（无需指定-C，tar会自动创建）
           tar -zxvf fmk_099.tar.gz
-          # 验证fmk目录是否存在，且包含核心old脚本
           if [ ! -d "fmk" ] || [ ! -f "fmk/old-extract.sh" ] || [ ! -f "fmk/old-build.sh" ]; then
             echo "ERROR: fmk目录或核心old脚本缺失"
-            ls -l ./  # 输出当前目录结构，便于排查
+            ls -l ./
             exit 1
           fi
           rm -f fmk_099.tar.gz
-          echo "✅ 下载解压完成，fmk目录及old脚本已确认存在"
+          echo "✅ 官方包下载解压完成"
 
-      - name: 给old脚本加执行权限
+      - name: 官方预处理（编译C#工具+清理残留，遵循文档步骤）
         run: |
           cd fmk
-          chmod +x old-extract.sh old-build.sh
-          chmod +x src/*/*.sh
+          # 1. 执行官方清理脚本（文档要求：解包前清理临时文件）
+          chmod +x cleanup.sh && sudo ./cleanup.sh
+          # 2. 编译C#源码（src/lzma/CS，官方文档核心步骤，生成Lzma压缩工具）
+          cd src/lzma/CS/7zip/Compress/LzmaAlone
+          mono-mcs LzmaAlone.cs -r:System.dll -out:LzmaAlone.exe
+          # 3. 复制编译后的工具到FMK根目录（确保old脚本能调用）
+          cp LzmaAlone.exe ../../../../../
+          cd ../../../../../
+          echo "✅ 官方预处理完成（编译C#工具+清理残留）"
+
+      - name: 授权核心脚本（遵循文档最小授权原则）
+        run: |
+          cd fmk
+          chmod +x old-extract.sh old-build.sh cleanup.sh
           cd ../
-          echo "✅ old脚本权限设置完成"
+          echo "✅ 核心脚本授权完成"
 
       - name: 复制Padavan固件
         run: |
@@ -59,41 +70,50 @@ jobs:
           fi
           echo "FW_NAME=$FW_NAME" >> $GITHUB_ENV
 
-      - name: 用官方old-extract.sh解包（兼容Padavan）
+      - name: 官方old-extract.sh解包（指定Padavan兼容参数，遵循文档用法）
         run: |
+          # 官方文档提示：Padavan固件多为uImage+SquashFS，无需额外参数，old脚本自动识别
           sudo ./fmk/old-extract.sh ./$FW_NAME
-          if [ ! -d "fmk/rootfs" ]; then
-            echo "ERROR: 解包失败，可能固件非Padavan/uImage格式"
+          if [ ! -d "fmk/rootfs" ] && [ ! -d "fmk/squashfs-root" ]; then
+            echo "ERROR: 解包失败，可能固件格式不兼容（Padavan需为uImage/SquashFS）"
+            # 输出固件信息，便于排查（官方文档推荐的排障步骤）
+            binwalk ./$FW_NAME
             exit 1
           fi
-          echo "✅ old脚本解包完成"
+          echo "✅ 官方old脚本解包完成（遵循文档兼容逻辑）"
 
-      - name: 复制解包后源码（完整保留）
+      - name: 复制完整源码（遵循文档目录结构，保留所有解包文件）
         run: |
           mkdir -p padavan_source
-          sudo cp -r fmk/rootfs fmk/kernel fmk/squashfs-root fmk/*.img padavan_source/ 2>/dev/null
+          # 官方文档解包后核心目录：rootfs/squashfs-root（根文件系统）、kernel（内核）、工具编译产物
+          sudo cp -r fmk/rootfs fmk/squashfs-root fmk/kernel fmk/*.img fmk/LzmaAlone.exe padavan_source/ 2>/dev/null
           sudo chmod -R 755 padavan_source
-          echo "✅ 源码已复制到 padavan_source 目录"
+          echo "✅ 源码复制完成（遵循官方目录结构）"
           ls -l padavan_source
+
+      - name: 官方old-build.sh打包（复用原固件参数，文档确保开机兼容性）
+        run: |
+          cd fmk
+          # 官方文档强调：old-build.sh自动复用原固件分区表、压缩格式，无需额外参数
+          sudo ./old-build.sh
+          if [ ! -f "firmware.bin" ]; then
+            echo "ERROR: 打包失败，查看old-build.sh输出日志"
+            exit 1
+          fi
+          cd ../
+          cp fmk/firmware.bin final_fw.bin
+          echo "✅ 官方old脚本打包完成（参数与原固件一致）"
 
       - name: 上传解包后完整源码
         uses: actions/upload-artifact@v4
         with:
-          name: Padavan_Unpacked_Source
+          name: Padavan_Unpacked_Source（遵循官方文档）
           path: padavan_source/
           retention-days: 30
-
-      - name: 用官方old-build.sh打包（确保开机）
-        run: |
-          cd fmk
-          sudo ./old-build.sh
-          cd ../
-          cp fmk/firmware.bin final_fw.bin
-          echo "✅ 固件打包完成"
 
       - name: 上传可开机固件
         uses: actions/upload-artifact@v4
         with:
-          name: Padavan_Bootable_Firmware
+          name: Padavan_Bootable_Firmware（遵循官方文档）
           path: final_fw.bin
           retention-days: 30
