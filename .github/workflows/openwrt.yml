@@ -1,4 +1,4 @@
-name: FMK_Old_Script_Stable（Padavan专用，遵循官方文档）
+name: Ros_Bin_Auto_Trigger
 on:
   workflow_dispatch:
   push:
@@ -12,108 +12,97 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装官方完整依赖（含C#编译+压缩库，遵循文档要求）
-        run: |
-          sudo apt update -y
-          # 官方文档指定依赖：build-essential+压缩库+mono（编译C#源码）+工具链
-          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget mono-devel mono-mcs
-          echo "✅ 官方完整依赖安装完成（含C#编译环境）"
+      - name: 安装必需工具（含修复依赖）
+        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget flex bison libssl-dev
 
-      - name: 终极清理（执行官方cleanup.sh，遵循文档预处理步骤）
-        run: |
-          sudo rm -rf fmk final_fw.bin ros.bin padavan_source fmk_099.tar.gz 2>/dev/null
-          # 后续解压后执行官方清理脚本，此处先清理全局残留
-          echo "✅ 全局残留清理完成"
+      - name: 彻底清理残留
+        run: sudo rm -rf fmk* fmk_ros_only* ros.extracted ros.bin.extracted final_fw.bin 2>/dev/null
 
-      - name: 下载+解压FMK（官方原始包，保持目录结构）
+      - name: 克隆FMK工具并编译
         run: |
-          wget https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/firmware-mod-kit/fmk_099.tar.gz
-          tar -zxvf fmk_099.tar.gz
-          if [ ! -d "fmk" ] || [ ! -f "fmk/old-extract.sh" ] || [ ! -f "fmk/old-build.sh" ]; then
-            echo "ERROR: fmk目录或核心old脚本缺失"
-            ls -l ./
-            exit 1
-          fi
-          rm -f fmk_099.tar.gz
-          echo "✅ 官方包下载解压完成"
+          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_ros_only
+          cd fmk_ros_only/src
+          sudo make clean && sudo make || { echo "ERROR: FMK编译失败"; exit 1; }
+          cd ../../ && chmod +x fmk_ros_only/*.sh
 
-      - name: 官方预处理（编译C#工具+清理残留，遵循文档步骤）
-        run: |
-          cd fmk
-          # 1. 执行官方清理脚本（文档要求：解包前清理临时文件）
-          chmod +x cleanup.sh && sudo ./cleanup.sh
-          # 2. 编译C#源码（src/lzma/CS，官方文档核心步骤，生成Lzma压缩工具）
-          cd src/lzma/CS/7zip/Compress/LzmaAlone
-          mono-mcs LzmaAlone.cs -r:System.dll -out:LzmaAlone.exe
-          # 3. 复制编译后的工具到FMK根目录（确保old脚本能调用）
-          cp LzmaAlone.exe ../../../../../
-          cd ../../../../../
-          echo "✅ 官方预处理完成（编译C#工具+清理残留）"
+      - name: 定义固件文件名（无需修改，你的固件名ROS.bin）
+        run: echo "FW_FILE=ROS.bin" >> $GITHUB_ENV
 
-      - name: 授权核心脚本（遵循文档最小授权原则）
+      - name: 检查固件是否在当前目录
         run: |
-          cd fmk
-          chmod +x old-extract.sh old-build.sh cleanup.sh
-          cd ../
-          echo "✅ 核心脚本授权完成"
-
-      - name: 复制Padavan固件
-        run: |
-          FW_NAME="ros.bin"
-          if [ -f ".github/workflows/$FW_NAME" ]; then
-            cp .github/workflows/$FW_NAME ./$FW_NAME
-            chmod 644 ./$FW_NAME
-            echo "✅ 加载固件：$FW_NAME"
+          if [ -f "$FW_FILE" ]; then
+            echo "✅ 成功找到固件：$FW_FILE（和源码在同一目录）"
           else
-            echo "ERROR: 未找到$FW_NAME，请确认文件在.github/workflows/目录"
+            echo "ERROR: 未找到$FW_FILE，请确认固件和源码放在同一目录下"
             exit 1
           fi
-          echo "FW_NAME=$FW_NAME" >> $GITHUB_ENV
 
-      - name: 官方old-extract.sh解包（指定Padavan兼容参数，遵循文档用法）
+      - name: 自动扫描固件参数（适配ROS.bin）
         run: |
-          # 官方文档提示：Padavan固件多为uImage+SquashFS，无需额外参数，old脚本自动识别
-          sudo ./fmk/old-extract.sh ./$FW_NAME
-          if [ ! -d "fmk/rootfs" ] && [ ! -d "fmk/squashfs-root" ]; then
-            echo "ERROR: 解包失败，可能固件格式不兼容（Padavan需为uImage/SquashFS）"
-            # 输出固件信息，便于排查（官方文档推荐的排障步骤）
-            binwalk ./$FW_NAME
+          # 扫描uImage头部参数
+          if mkimage -l $FW_FILE 2>/dev/null; then
+            IMAGE_ARCH=$(mkimage -l $FW_FILE | grep -i "Architecture" | awk '{print $3}' | sed 's/://g')
+            IMAGE_ADDR=$(mkimage -l $FW_FILE | grep -i "Data Address" | awk '{print $4}')
+            IMAGE_ENTRY=$(mkimage -l $FW_FILE | grep -i "Entry Point" | awk '{print $4}')
+            IMAGE_COMP=$(mkimage -l $FW_FILE | grep -i "Compression" | awk '{print $3}' | sed 's/://g')
+          else
+            IMAGE_ARCH="mips"
+            IMAGE_ADDR="0x80060000" # OpenWrt/ROS默认加载地址
+            IMAGE_ENTRY="0x80060000" # 真实入口地址，修复启动失败问题
+            IMAGE_COMP="lzma"
+          fi
+          # 扫描Squashfs参数（修复管道语法错误）
+          if binwalk $FW_FILE | grep -i "Squashfs filesystem" 2>/dev/null; then
+            SQSH_COMP=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}')
+            SQSH_BLOCK=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11)}' | sed 's/ bytes//g')
+          else
+            SQSH_COMP="xz"
+            SQSH_BLOCK="262144" # 256KB默认块大小
+          fi
+          # 参数兜底
+          IMAGE_ARCH=${IMAGE_ARCH:-"mips"}
+          IMAGE_ADDR=${IMAGE_ADDR:-"0x80060000"}
+          IMAGE_ENTRY=${IMAGE_ENTRY:-"0x80060000"}
+          IMAGE_COMP=${IMAGE_COMP:-"lzma"}
+          SQSH_COMP=${SQSH_COMP:-"xz"}
+          SQSH_BLOCK=${SQSH_BLOCK:-"262144"}
+          # 输出参数
+          echo "📌 固件参数："
+          echo "架构：$IMAGE_ARCH | 加载地址：$IMAGE_ADDR | 入口地址：$IMAGE_ENTRY | 内核压缩：$IMAGE_COMP"
+          echo "文件系统压缩：$SQSH_COMP | 块大小：$SQSH_BLOCK"
+          # 存入环境变量
+          echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
+          echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
+          echo "IMAGE_ENTRY=$IMAGE_ENTRY" >> $GITHUB_ENV
+          echo "IMAGE_COMP=$IMAGE_COMP" >> $GITHUB_ENV
+          echo "SQSH_COMP=$SQSH_COMP" >> $GITHUB_ENV
+          echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
+
+      - name: 自动解包ROS.bin
+        run: |
+          sudo ./fmk_ros_only/extract-firmware.sh $FW_FILE
+          if [ -d "$FW_FILE.extracted/rootfs" ]; then
+            mv $FW_FILE.extracted ros.extracted
+          elif [ -d "fmk/rootfs" ]; then
+            mv fmk ros.extracted
+          else
+            echo "ERROR: 固件解包失败，确认是uImage+Squashfs格式！"
             exit 1
           fi
-          echo "✅ 官方old脚本解包完成（遵循文档兼容逻辑）"
 
-      - name: 复制完整源码（遵循文档目录结构，保留所有解包文件）
+      - name: 自动打包rootfs
         run: |
-          mkdir -p padavan_source
-          # 官方文档解包后核心目录：rootfs/squashfs-root（根文件系统）、kernel（内核）、工具编译产物
-          sudo cp -r fmk/rootfs fmk/squashfs-root fmk/kernel fmk/*.img fmk/LzmaAlone.exe padavan_source/ 2>/dev/null
-          sudo chmod -R 755 padavan_source
-          echo "✅ 源码复制完成（遵循官方目录结构）"
-          ls -l padavan_source
+          cd ros.extracted/rootfs
+          sudo mksquashfs . ../rootfs.sqsh -b $SQSH_BLOCK -comp $SQSH_COMP -no-xattrs -all-root
+          cd ../../
 
-      - name: 官方old-build.sh打包（复用原固件参数，文档确保开机兼容性）
+      - name: 重建uImage头部（修复启动问题）
         run: |
-          cd fmk
-          # 官方文档强调：old-build.sh自动复用原固件分区表、压缩格式，无需额外参数
-          sudo ./old-build.sh
-          if [ ! -f "firmware.bin" ]; then
-            echo "ERROR: 打包失败，查看old-build.sh输出日志"
-            exit 1
-          fi
-          cd ../
-          cp fmk/firmware.bin final_fw.bin
-          echo "✅ 官方old脚本打包完成（参数与原固件一致）"
+          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -d ros.extracted/rootfs.sqsh final_fw.bin
 
-      - name: 上传解包后完整源码
+      - name: 上传修改后的固件
         uses: actions/upload-artifact@v4
         with:
-          name: Padavan_Unpacked_Source（遵循官方文档）
-          path: padavan_source/
-          retention-days: 30
-
-      - name: 上传可开机固件
-        uses: actions/upload-artifact@v4
-        with:
-          name: Padavan_Bootable_Firmware（遵循官方文档）
+          name: Modified_ROS_Firmware
           path: final_fw.bin
           retention-days: 30
