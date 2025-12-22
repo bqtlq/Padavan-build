@@ -112,4 +112,68 @@ jobs:
           echo "=== 查找残留PPPoE文件 ==="
           残留文件=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
           if [ -n "$残留文件" ]; then
-            find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/nul
+            find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/null || true
+            echo "✅ 删除残留文件：$残留文件"
+          else
+            echo "✅ 无PPPoE残留文件"
+          fi
+          
+          cd ../
+          echo "=== PPPoE组件删除完成 ==="
+
+      ###########################################################################
+      # 6. 重新打包Squashfs根文件系统（匹配原固件参数）
+      ###########################################################################
+      - name: 重新打包Squashfs镜像（适配原固件格式）
+        run: |
+          echo "=== 开始重新打包Squashfs ==="
+          
+          # 关键参数：与原固件完全一致（binwalk显示：xz压缩、blocksize: 262144 bytes）
+          mksquashfs rootfs/ firmware_split/new_rootfs.squashfs \
+            -comp xz \                  # 压缩算法：xz（原固件一致）
+            -b 262144 \                 # 块大小：256K（原固件一致）
+            -noappend \                 # 不追加模式（避免镜像冗余）
+            -all-root \                 # 所有文件权限为root（避免权限错误）
+            -processors 2               # 多线程加速（适配GitHub Actions环境）
+          
+          # 验证新镜像
+          if [ ! -f "firmware_split/new_rootfs.squashfs" ]; then
+            echo "ERROR: Squashfs重新打包失败"
+            exit 1
+          fi
+          echo "✅ Squashfs重新打包完成，新镜像大小：$(ls -lh firmware_split/new_rootfs.squashfs | awk '{print $5}')"
+
+      ###########################################################################
+      # 7. 合并生成可刷机固件（保留uImage头部，关键步骤）
+      ###########################################################################
+      - name: 合并uImage头部与新根文件系统
+        run: |
+          echo "=== 开始合并固件 ==="
+          
+          # 合并顺序：uImage头部 + 新Squashfs镜像（必须按此顺序，否则路由器无法识别）
+          cat firmware_split/uimage_header.bin firmware_split/new_rootfs.squashfs > Modified_PandoraBox_K1_NoPPPoE.bin
+          
+          # 验证最终固件
+          if [ ! -f "Modified_PandoraBox_K1_NoPPPoE.bin" ]; then
+            echo "ERROR: 固件合并失败"
+            exit 1
+          fi
+          
+          echo "=== 最终固件信息 ==="
+          ls -lh Modified_PandoraBox_K1_NoPPPoE.bin
+          file Modified_PandoraBox_K1_NoPPPoE.bin  # 应输出"uImage header"，确认格式正确
+          binwalk -x none Modified_PandoraBox_K1_NoPPPoE.bin | head -n10  # 验证结构正常
+          
+          echo "✅ 可刷机固件生成完成！文件名：Modified_PandoraBox_K1_NoPPPoE.bin"
+
+      ###########################################################################
+      # 8. 上传产物（固件+调试日志，方便排错）
+      ###########################################################################
+      - name: 上传最终固件和调试日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: PandoraBox_K1_NoPPPoE_Firmware
+          path: |
+            Modified_PandoraBox_K1_NoPPPoE.bin  # 最终可刷机固件
+            firmware_split/                     # 中间产物（排错用）
+          retention-days: 90  # 产物保留90天（足够刷机测试）
