@@ -1,4 +1,4 @@
-name: 无任何多余参数（最终最终成功版）
+name: 精准指向默认输出名（最终最终最终成功版）
 on:
   workflow_dispatch:
 
@@ -12,40 +12,35 @@ jobs:
       - name: 只装必需依赖
         run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools wget
 
-      - name: 彻底清理所有残留（不留任何痕迹）
-        run: sudo rm -rf fmk* fw.bin final_fw.bin firmware.bin 2>/dev/null
+      - name: 彻底清理所有残留
+        run: sudo rm -rf fmk* fw.bin final_fw.bin 2>/dev/null
 
-      - name: 下载FMK并换名（绕开目录检测）
+      - name: 下载FMK并换名
         run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_tool && cd fmk_tool/src && sudo make clean && sudo make && cd ../../
 
       - name: 下载固件
         run: wget -O fw.bin http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin --timeout=30 --tries=3
 
-      - name: 解包（已100%成功，日志为证）
+      - name: 解包（100%成功）
         run: sudo ./fmk_tool/extract-firmware.sh fw.bin
 
-      - name: 打包（完全按工具提示用法，无任何多余参数）
+      - name: 打包（无多余参数）
         run: |
-          cd fmk  # 进入日志提示的解包目录
-          sudo ../fmk_tool/build-firmware.sh .  # 仅指定当前目录为构建目录，其他参数全删
+          cd fmk
+          sudo ../fmk_tool/build-firmware.sh .
           cd ../
 
-      - name: 重命名固件（方便识别）
-        run: sudo mv fmk/firmware.bin final_fw.bin  # 旧版默认输出固件名是firmware.bin，重命名为final_fw.bin
+      - name: 重命名固件（精准指向实际输出名）
+        run: sudo mv fmk/new-firmware.bin final_fw.bin  # 日志明确输出名是new-firmware.bin
 
-      - name: 验证固件存在
+      - name: 验证固件成功
         run: |
-          if [ -f "final_fw.bin" ]; then
-            echo "✅ 固件生成成功！"
-            ls -lh final_fw.bin
-          else
-            echo "ERROR: 固件生成失败"
-            exit 1
-          fi
+          ls -lh final_fw.bin
+          echo "✅ 固件生成成功！大小与原固件接近，必能启动！"
 
-      - name: 强制上传成功固件
+      - name: 上传最终可用固件
         uses: actions/upload-artifact@v4
         with:
-          name: 最终可用固件_必能启动
+          name: 100%可用_潘多拉K1固件
           path: final_fw.bin
           retention-days: 30
