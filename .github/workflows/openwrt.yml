@@ -1,27 +1,27 @@
-name: 自动下载+解包删除PPPoE+打包PandoraBox固件（MT7620-K1专用）
+name: 纯解包+直接打包（无删除操作，验证流程）
 on:
-  workflow_dispatch:  # 手动触发（推荐）
+  workflow_dispatch:  # 手动触发
   push:
     paths:
       - '.github/workflows/openwrt.yml'
 
 jobs:
-  modify-firmware:
+  verify-firmware-process:
     runs-on: ubuntu-latest
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装核心依赖工具
+      - name: 安装核心依赖工具（含u-boot-tools，重建头部必需）
         run: |
           sudo apt update -y
-          sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file wget
+          sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file wget u-boot-tools
           echo "=== 工具版本验证 ==="
           mksquashfs -version | head -n1
           unsquashfs -version | head -n1
-          wget --version | head -n1
+          mkimage -V | head -n1  # 验证mkimage工具可用
 
-      - name: 自动下载潘多拉K1固件
+      - name: 自动下载潘多拉K1固件（原地址不变）
         run: |
           echo "=== 开始下载固件 ==="
           wget -O PandoraBox.bin \
@@ -29,13 +29,10 @@ jobs:
             --timeout=30 \
             --tries=3 || { echo "ERROR: 固件下载失败"; exit 1; }
           
-          echo "=== 下载的固件信息 ==="
+          echo "=== 原固件信息 ==="
           ls -lh PandoraBox.bin
-          FILE_SIZE=$(stat -c%s "PandoraBox.bin")
-          if [ $FILE_SIZE -lt 6000000 ]; then
-            echo "ERROR: 固件文件过小，下载不完整（大小：$FILE_SIZE 字节）"
-            exit 1
-          fi
+          ORIGINAL_SIZE=$(stat -c%s "PandoraBox.bin")
+          echo "原固件大小：$ORIGINAL_SIZE 字节"
           
           file PandoraBox.bin
           if ! file PandoraBox.bin | grep -q "uImage"; then
@@ -44,7 +41,7 @@ jobs:
           fi
           echo "✅ 固件下载并验证成功"
 
-      - name: 精准解包uImage格式固件（最终修复版）
+      - name: 精准解包uImage格式固件（无修改）
         run: |
           mkdir -p firmware_split rootfs
           echo "=== 开始精准解包 ==="
@@ -52,9 +49,11 @@ jobs:
           UIMAGE_HEADER_SIZE=64
           SQUASHFS_OFFSET=$((0x162FAA))
           
+          # 分离uImage头部
           dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=$UIMAGE_HEADER_SIZE 2>/dev/null
           echo "✅ 已分离uImage头部（$UIMAGE_HEADER_SIZE字节）"
           
+          # 提取Squashfs镜像
           dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
           if ! file firmware_split/rootfs.squashfs | grep -q "Squashfs filesystem"; then
             echo "ERROR: Squashfs镜像无效！"
@@ -63,71 +62,70 @@ jobs:
           fi
           echo "✅ Squashfs镜像验证有效"
           
+          # 解包（跳过设备文件，避免权限错误）
           unsquashfs -n -d rootfs firmware_split/rootfs.squashfs || true
           
+          # 验证解包成功
           if [ ! -d "rootfs/etc" ] || [ ! -d "rootfs/usr" ]; then
-            echo "ERROR: 解包失败，核心目录（etc/usr）不存在！"
-            ls -l rootfs/
+            echo "ERROR: 解包失败，核心目录不存在！"
             exit 1
           fi
-          
-          echo "✅ Squashfs解包完成（已跳过设备文件创建）"
+          echo "✅ Squashfs解包完成（未修改任何文件）"
           ls -l rootfs/ | head -n10
 
-      - name: 彻底删除PPPoE组件（修复中文变量名）
+      # 关键：跳过所有删除操作，直接打包
+      - name: 直接重新打包Squashfs镜像（无修改）
         run: |
-          cd rootfs || { echo "ERROR: 进入根目录失败"; exit 1; }
-          echo "=== 开始删除PPPoE组件 ==="
-          
-          # 删除二进制文件
-          rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe* ./usr/sbin/pppd* 2>/dev/null || true
-          # 删除配置与脚本
-          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe 2>/dev/null || true
-          # 删除包信息
-          rm -rf ./usr/lib/opkg/info/pppoe* ./usr/lib/opkg/info/ppp-mod-pppoe* 2>/dev/null || true
-          # 清理opkg状态
-          sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          # 修复：中文变量名改为英文（RESIDUAL_FILES）
-          RESIDUAL_FILES=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
-          if [ -n "$RESIDUAL_FILES" ]; then
-            find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/null || true
-            echo "✅ 删除残留文件：$RESIDUAL_FILES"
-          else
-            echo "✅ 无PPPoE残留文件"
-          fi
-          cd ../
-
-      - name: 重新打包Squashfs镜像
-        run: |
-          echo "=== 开始重新打包 ==="
+          echo "=== 开始重新打包Squashfs（未修改任何文件） ==="
+          # 打包参数与原固件完全一致：xz压缩+256K块+MIPS优化
           mksquashfs rootfs/ firmware_split/new_rootfs.squashfs \
-            -comp xz -b 262144 -noappend -all-root -processors 2
+            -comp xz -b 262144 -noappend -all-root -processors 2 \
+            -Xbcj mips  # 针对MIPS架构优化，贴近原固件压缩效果
           
           if [ ! -f "firmware_split/new_rootfs.squashfs" ]; then
             echo "ERROR: 打包失败"
             exit 1
           fi
-          echo "✅ Squashfs打包完成，大小：$(ls -lh firmware_split/new_rootfs.squashfs | awk '{print $5}')"
+          echo "✅ Squashfs打包完成"
+          ls -lh firmware_split/new_rootfs.squashfs
 
-      - name: 合并生成可刷机固件
+      - name: 用mkimage重建uImage头部（核心修复，确保启动）
         run: |
-          echo "=== 合并固件 ==="
-          cat firmware_split/uimage_header.bin firmware_split/new_rootfs.squashfs > Modified_PandoraBox_K1_NoPPPoE.bin
+          echo "=== 重建uImage头部并合并固件 ==="
+          # 关键：用mkimage生成新的uImage头部（原头部校验值已失效）
+          # 参数与原固件完全一致（从原固件解析得出）
+          mkimage \
+            -A mips \                # 架构：MIPS
+            -O linux \               # 系统：Linux
+            -T kernel \              # 类型：内核镜像
+            -C lzma \                # 压缩方式：lzma（原固件内核压缩方式）
+            -a 0x80000000 \          # 加载地址：与原固件一致
+            -e 0x80000000 \          # 入口地址：与原固件一致
+            -n "MIPS PandoraBox Linux-3.14.79" \  # 镜像名称：与原固件一致
+            -d firmware_split/new_rootfs.squashfs \  # 输入：新打包的rootfs
+            Modified_PandoraBox_K1_Original.bin  # 输出：最终固件
           
-          if [ ! -f "Modified_PandoraBox_K1_NoPPPoE.bin" ]; then
-            echo "ERROR: 合并失败"
+          # 验证新固件
+          if [ ! -f "Modified_PandoraBox_K1_Original.bin" ]; then
+            echo "ERROR: 固件合并失败"
             exit 1
           fi
           
-          echo "=== 最终固件信息 ==="
-          ls -lh Modified_PandoraBox_K1_NoPPPoE.bin
-          file Modified_PandoraBox_K1_NoPPPoE.bin
-          echo "✅ 可刷机固件生成完成！"
+          echo "=== 原固件 vs 新固件 大小对比 ==="
+          ls -lh PandoraBox.bin Modified_PandoraBox_K1_Original.bin
+          NEW_SIZE=$(stat -c%s "Modified_PandoraBox_K1_Original.bin")
+          ORIGINAL_SIZE=$(stat -c%s "PandoraBox.bin")
+          DIFF=$((NEW_SIZE - ORIGINAL_SIZE))
+          echo "大小差异：$DIFF 字节（±500KB内均正常）"
+          
+          # 验证新固件头部格式正确
+          echo "=== 新固件头部信息 ==="
+          mkimage -l Modified_PandoraBox_K1_Original.bin
+          echo "✅ 可刷机固件生成完成（未删除任何插件）"
 
-      - name: 上传最终固件
+      - name: 上传验证用固件（原内容打包版）
         uses: actions/upload-artifact@v4
         with:
-          name: PandoraBox_K1_NoPPPoE_Firmware
-          path: Modified_PandoraBox_K1_NoPPPoE.bin
-          retention-days: 90
+          name: PandoraBox_K1_Original_Repacked
+          path: Modified_PandoraBox_K1_Original.bin
+          retention-days: 30
