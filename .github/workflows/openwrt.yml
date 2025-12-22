@@ -16,51 +16,87 @@ jobs:
       - name: 安装依赖工具
         run: |
           sudo apt update -y
-          sudo apt install -y binwalk squashfs-tools build-essential  # 仅保留系统原生工具
-          # 验证工具安装
+          sudo apt install -y binwalk squashfs-tools build-essential jffs2-tools  # 新增jffs2工具
+          # 验证工具
           mksquashfs -version
           unsquashfs -version
+          binwalk -v
 
       - name: 加载PandoraBox.bin固件
         run: |
           cp .github/workflows/PandoraBox.bin ./PandoraBox.bin
           ls -l ./PandoraBox.bin
+          # 提前分析固件格式（关键调试步骤）
+          binwalk ./PandoraBox.bin > firmware_analysis.log
+          cat firmware_analysis.log  # 输出固件结构到日志
 
-      - name: 解包PandoraBox固件
+      - name: 解包PandoraBox固件（带容错）
         run: |
-          binwalk -Me PandoraBox.bin
-          ls -l _PandoraBox.bin.extracted/
-          cd _PandoraBox.bin.extracted/squashfs-root || exit 1
-          pwd
+          # 强制递归解包，指定输出目录
+          binwalk -Me ./PandoraBox.bin --directory firmware_extract
+          # 查看解包后的所有文件（关键：找到真正的根文件系统）
+          ls -R firmware_extract/ > extract_list.log
+          cat extract_list.log
+          # 查找squashfs/jffs2根文件系统目录
+          SQUASHFS_ROOT=$(find firmware_extract/ -name "squashfs-root" -type d | head -n1)
+          JFFS2_IMG=$(find firmware_extract/ -name "*.jffs2" -type f | head -n1)
+          
+          # 处理squashfs格式
+          if [ -n "$SQUASHFS_ROOT" ]; then
+            echo "找到squashfs根文件系统：$SQUASHFS_ROOT"
+            ln -s "$SQUASHFS_ROOT" ./rootfs  # 创建软链接统一路径
+          # 处理jffs2格式
+          elif [ -n "$JFFS2_IMG" ]; then
+            echo "找到jffs2镜像：$JFFS2_IMG"
+            mkdir -p ./rootfs
+            # 挂载jffs2镜像（需root）
+            sudo modprobe mtdram total_size=65536 erase_size=256
+            sudo modprobe mtdblock
+            sudo dd if="$JFFS2_IMG" of=/dev/mtdblock0
+            sudo mount /dev/mtdblock0 ./rootfs
+          else
+            echo "ERROR: 未找到squashfs/jffs2根文件系统！"
+            cat extract_list.log
+            exit 1
+          fi
+          ls -l ./rootfs  # 验证根文件系统
 
       - name: 删除PPPoE组件
         run: |
-          cd _PandoraBox.bin.extracted/squashfs-root || exit 1
-          # 删除PPPoE二进制/配置/脚本
-          rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe*
-          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe
-          # 清理opkg状态记录
-          sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null
-          sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null
-          # 清理残留文件
-          find . -name "*pppoe*" -exec rm -rf {} \; 2>/dev/null
-          cd ../../
-
-      - name: 重新打包squashfs镜像
-        run: |
-          cd _PandoraBox.bin.extracted/
-          # 用系统工具打包，参数与潘多拉固件一致（lzma+256K块）
-          mksquashfs squashfs-root new_rootfs.bin -comp lzma -b 262144 -noappend -all-root
-          ls -l new_rootfs.bin
+          cd ./rootfs || exit 1
+          # 容错删除：不存在的文件不报错
+          rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe* || true
+          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe || true
+          sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
+          sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
+          find . -name "*pppoe*" -exec rm -rf {} \; 2>/dev/null || true
           cd ../
+
+      - name: 重新打包根文件系统
+        run: |
+          # 判断原格式并对应打包
+          SQUASHFS_ROOT=$(find firmware_extract/ -name "squashfs-root" -type d | head -n1)
+          JFFS2_IMG=$(find firmware_extract/ -name "*.jffs2" -type f | head -n1)
+          
+          if [ -n "$SQUASHFS_ROOT" ]; then
+            # squashfs打包（保留原参数）
+            mksquashfs ./rootfs new_rootfs.bin -comp lzma -b 262144 -noappend -all-root
+          elif [ -n "$JFFS2_IMG" ]; then
+            # jffs2打包
+            sudo umount ./rootfs
+            mkfs.jffs2 -d ./rootfs -o new_rootfs.bin -e 0x10000 -s 0x200
+          fi
+          ls -l new_rootfs.bin
 
       - name: 合并生成最终固件
         run: |
-          # 分离原固件头部（前4096字节为bootloader）
-          dd if=PandoraBox.bin of=bootloader.bin bs=1 count=4096
-          # 合并头部+新根文件系统
-          cat bootloader.bin _PandoraBox.bin.extracted/new_rootfs.bin > Modified_PandoraBox.bin
-          # 校验固件结构
+          # 分离原固件bootloader（动态计算头部大小，更精准）
+          BOOTLOADER_SIZE=$(grep -oP '^\d+:\s+gzip compressed data, bootloader' firmware_analysis.log | cut -d: -f1)
+          if [ -z "$BOOTLOADER_SIZE" ]; then BOOTLOADER_SIZE=4096; fi
+          dd if=PandoraBox.bin of=bootloader.bin bs=1 count=$BOOTLOADER_SIZE
+          # 合并固件
+          cat bootloader.bin new_rootfs.bin > Modified_PandoraBox.bin
+          # 校验
           binwalk Modified_PandoraBox.bin
           ls -l Modified_PandoraBox.bin
 
@@ -69,4 +105,13 @@ jobs:
         with:
           name: Modified_PandoraBox_NoPPPoE
           path: ./Modified_PandoraBox.bin
+          retention-days: 30
+          
+      - name: 上传调试日志（排错用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs
+          path: |
+            firmware_analysis.log
+            extract_list.log
           retention-days: 30
