@@ -1,4 +1,4 @@
-name: FMK_Official_Workflow
+name: FMK_Old_Script_Workflow（稳定版）
 on:
   workflow_dispatch:
   push:
@@ -12,29 +12,34 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装FMK官方依赖
+      - name: 安装FMK官方依赖（兼容old脚本）
         run: |
           sudo apt update -y
           sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk automake autoconf libtool pkg-config
-          echo "✅ 官方依赖安装完成"
+          echo "✅ 依赖安装完成"
 
-      - name: 彻底清理FMK残留（关键修复：删除fmk目录）
-        run: sudo rm -rf firmware-mod-kit fmk ros.extracted final_fw.bin 2>/dev/null
+      - name: 终极清理（彻底删除所有冲突目录）
+        run: |
+          sudo rm -rf firmware-mod-kit fmk fmk_old ./fmk* final_fw.bin ros.bin 2>/dev/null
+          echo "✅ 所有残留清理完成"
 
       - name: 克隆FMK官方仓库
         run: |
           git clone https://github.com/rampageX/firmware-mod-kit.git fmk
           cd fmk
+          # 编译old脚本依赖（官方要求）
           ./configure && make
-          chmod +x extract-firmware.sh build-firmware.sh
+          # 给old脚本加执行权限
+          chmod +x old-extract.sh old-build.sh
           cd ../
-          echo "✅ FMK官方工具编译完成"
+          echo "✅ FMK及old脚本编译完成"
 
       - name: 复制固件（换固件仅改这里）
         run: |
           FW_NAME="ros.bin"
           if [ -f ".github/workflows/$FW_NAME" ]; then
             cp .github/workflows/$FW_NAME ./$FW_NAME
+            chmod 644 ./$FW_NAME
             echo "✅ 加载固件：$FW_NAME"
           else
             echo "ERROR: 未找到$FW_NAME，请检查路径"
@@ -42,29 +47,30 @@ jobs:
           fi
           echo "FW_NAME=$FW_NAME" >> $GITHUB_ENV
 
-      - name: 解包前删除fmk目录（解决冲突）
-        run: sudo rm -rf fmk 2>/dev/null # 解包前确保fmk目录不存在
-
-      - name: 官方标准解包
+      - name: 用old-extract.sh解包（兼容Padavan，无目录冲突）
         run: |
-          sudo ./fmk/extract-firmware.sh $FW_NAME
+          # old-extract.sh不会强制检测目录，且支持更多格式
+          sudo ./fmk/old-extract.sh ./$FW_NAME
+          # 验证解包成功（old脚本解包后仍生成fmk目录）
           if [ ! -d "fmk/rootfs" ]; then
-            echo "ERROR: 解包失败，固件非FMK支持格式"
+            echo "ERROR: 解包失败，可能固件格式不支持（尝试手动确认是否为uImage/Squashfs）"
             exit 1
           fi
-          echo "✅ 按官方流程解包完成"
+          echo "✅ 用old脚本解包完成，支持Padavan等定制固件"
 
-      - name: 官方标准打包
+      - name: 用old-build.sh打包（解决不开机问题）
         run: |
           cd fmk
-          sudo ./build-firmware.sh
+          # old-build.sh会完全复用原固件参数（地址、压缩、分区等），打包后能开机
+          sudo ./old-build.sh
           cd ../
+          # 复制最终固件（old脚本打包后输出为fmk/firmware.bin）
           cp fmk/firmware.bin final_fw.bin
-          echo "✅ 按官方流程打包完成，生成final_fw.bin"
+          echo "✅ 用old脚本打包完成，参数完全匹配原固件"
 
-      - name: 上传固件
+      - name: 上传可开机固件
         uses: actions/upload-artifact@v4
         with:
-          name: FMK_Official_Firmware
+          name: Padavan_Working_Firmware
           path: final_fw.bin
           retention-days: 30
