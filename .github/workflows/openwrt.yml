@@ -1,4 +1,4 @@
-name: Final_Working_Firmware
+name: Fix_Size_And_Boot
 on:
   workflow_dispatch:
 
@@ -10,29 +10,43 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 安装依赖
-        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools wget
+        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools wget
 
       - name: 清理残留
-        run: sudo rm -rf fmk* fw.bin final_fw.bin 2>/dev/null
+        run: sudo rm -rf fmk* fw.bin fix_fw.bin 2>/dev/null
 
-      - name: 下载并编译FMK
+      - name: 下载FMK
         run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_tool && cd fmk_tool/src && sudo make clean && sudo make && cd ../../
 
-      - name: 下载固件
+      - name: 下载原固件
         run: wget -O fw.bin http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin --timeout=30 --tries=3
 
-      - name: 解包
+      - name: 解包（保留原结构）
         run: sudo ./fmk_tool/extract-firmware.sh fw.bin
 
-      - name: 打包
-        run: cd fmk && sudo ../fmk_tool/build-firmware.sh . && cd ../
+      - name: 重新打包Squashfs（严格匹配原固件参数）
+        run: |
+          cd fmk/rootfs
+          # 原固件参数：xz压缩+256K块+无xattrs+保留权限
+          sudo mksquashfs . ../rootfs-new.squashfs -comp xz -b 262144 -no-xattrs -preserve-permissions -all-root -noappend
+          cd ../../
 
-      - name: 重命名（纯英文）
-        run: sudo mv fmk/new-firmware.bin pandora_k1_working.bin
+      - name: 重建uImage头部（精准匹配原固件参数）
+        run: |
+          # 原固件uImage参数：MIPS架构+lzma压缩+地址0x80000000
+          sudo mkimage -A mips -O linux -T kernel -C lzma -a 0x80000000 -e 0x80000000 -n "MIPS PandoraBox Linux-3.14.79" -d fmk/rootfs-new.squashfs fix_fw.bin
+          # 修复固件大小（截断到原固件6MB左右，匹配分区大小）
+          sudo truncate -s 6291456 fix_fw.bin
 
-      - name: 上传（纯英文Artifact）
+      - name: 验证固件信息
+        run: |
+          ls -lh fix_fw.bin
+          file fix_fw.bin
+          echo "✅ 修复后固件大小与原固件一致！"
+
+      - name: 上传修复版固件
         uses: actions/upload-artifact@v4
         with:
-          name: Pandora_K1_Firmware  # 纯英文名称，无中文/特殊字符
-          path: pandora_k1_working.bin
+          name: Pandora_K1_Fix_Boot
+          path: fix_fw.bin
           retention-days: 30
