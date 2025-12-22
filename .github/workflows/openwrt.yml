@@ -20,16 +20,14 @@ jobs:
 
       - name: 终极清理（避免任何冲突）
         run: |
-          sudo rm -rf fmk firmware-mod-kit final_fw.bin ros.bin 2>/dev/null
+          sudo rm -rf fmk firmware-mod-kit final_fw.bin ros.bin padavan_source 2>/dev/null
           echo "✅ 残留清理完成"
 
       - name: 下载FMK官方完整包（含old脚本，无文件缺失）
         run: |
-          # 从Google Code归档下载官方v0.99完整包（含所有old脚本）
-          wget https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/firmware-mod-kit/firmware-mod-kit-v0.99.tar.gz
-          # 解压并重命名为fmk（方便后续操作）
+          wget https://github.com/rampageX/firmware-mod-kit/archive/refs/tags/0.99.tar.gz -O firmware-mod-kit-v0.99.tar.gz
           tar -zxvf firmware-mod-kit-v0.99.tar.gz
-          mv firmware-mod-kit-v0.99 fmk
+          mv firmware-mod-kit-0.99 fmk  # 适配你提供的镜像目录名
           rm firmware-mod-kit-v0.99.tar.gz
           echo "✅ 官方完整包下载解压完成，含old-extract.sh/old-build.sh"
 
@@ -56,7 +54,6 @@ jobs:
 
       - name: 用官方old-extract.sh解包（兼容Padavan）
         run: |
-          # 官方old脚本无目录强制检测，直接解包
           sudo ./fmk/old-extract.sh ./$FW_NAME
           if [ ! -d "fmk/rootfs" ]; then
             echo "ERROR: 解包失败，可能固件非Padavan/uImage格式"
@@ -64,10 +61,29 @@ jobs:
           fi
           echo "✅ old脚本解包完成，适配Padavan定制格式"
 
+      # -------------------------- 新增：保留+上传源码 --------------------------
+      - name: 复制解包后源码（完整保留rootfs/kernel）
+        run: |
+          # 创建独立源码目录，避免与打包流程冲突
+          mkdir -p padavan_source
+          # 复制核心源码目录（rootfs=根文件系统，kernel=内核，其他为辅助文件）
+          sudo cp -r fmk/rootfs fmk/kernel fmk/squashfs-root fmk/*.img padavan_source/ 2>/dev/null
+          # 修复源码目录权限（方便本地下载后编辑）
+          sudo chmod -R 755 padavan_source
+          echo "✅ 源码已完整复制到 padavan_source 目录"
+          # 验证源码目录结构
+          ls -l padavan_source
+      # -------------------------- 新增：上传源码Artifact --------------------------
+      - name: 上传解包后完整源码
+        uses: actions/upload-artifact@v4
+        with:
+          name: Padavan_Unpacked_Source  # 源码压缩包名称
+          path: padavan_source/          # 要上传的源码目录
+          retention-days: 30             # 保留30天，与固件一致
+
       - name: 用官方old-build.sh打包（确保开机）
         run: |
           cd fmk
-          # old脚本完全复用原固件参数（分区、地址、压缩），打包后必开机
           sudo ./old-build.sh
           cd ../
           cp fmk/firmware.bin final_fw.bin
