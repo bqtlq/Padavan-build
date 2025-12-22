@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/openwrt.yml'
+      - '.github/workflows/ros.bin'
 
 jobs:
   build:
@@ -25,19 +26,21 @@ jobs:
           sudo make clean && sudo make || { echo "ERROR: FMK编译失败"; exit 1; }
           cd ../../ && chmod +x fmk_ros_only/*.sh
 
-      - name: 定义固件文件名（无需修改，你的固件名ROS.bin）
-        run: echo "FW_FILE=ROS.bin" >> $GITHUB_ENV
+      - name: 定义固件文件名（匹配你上传的ros.bin，小写）
+        run: echo "FW_FILE=ros.bin" >> $GITHUB_ENV
 
-      - name: 检查固件是否在当前目录
+      - name: 检查并复制固件（从.github/workflows/目录读取）
         run: |
-          if [ -f "$FW_FILE" ]; then
-            echo "✅ 成功找到固件：$FW_FILE（和源码在同一目录）"
+          FW_PATH=".github/workflows/$FW_FILE"
+          if [ -f "$FW_PATH" ]; then
+            cp $FW_PATH ./$FW_FILE
+            echo "✅ 成功找到并复制固件：$FW_PATH"
           else
-            echo "ERROR: 未找到$FW_FILE，请确认固件和源码放在同一目录下"
+            echo "ERROR: 未找到$FW_PATH，请确认固件在.github/workflows/目录下"
             exit 1
           fi
 
-      - name: 自动扫描固件参数（适配ROS.bin）
+      - name: 自动扫描固件参数（适配ros.bin）
         run: |
           # 扫描uImage头部参数
           if mkimage -l $FW_FILE 2>/dev/null; then
@@ -47,8 +50,8 @@ jobs:
             IMAGE_COMP=$(mkimage -l $FW_FILE | grep -i "Compression" | awk '{print $3}' | sed 's/://g')
           else
             IMAGE_ARCH="mips"
-            IMAGE_ADDR="0x80060000" # OpenWrt/ROS默认加载地址
-            IMAGE_ENTRY="0x80060000" # 真实入口地址，修复启动失败问题
+            IMAGE_ADDR="0x80060000"
+            IMAGE_ENTRY="0x80060000"
             IMAGE_COMP="lzma"
           fi
           # 扫描Squashfs参数（修复管道语法错误）
@@ -57,7 +60,7 @@ jobs:
             SQSH_BLOCK=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11)}' | sed 's/ bytes//g')
           else
             SQSH_COMP="xz"
-            SQSH_BLOCK="262144" # 256KB默认块大小
+            SQSH_BLOCK="262144"
           fi
           # 参数兜底
           IMAGE_ARCH=${IMAGE_ARCH:-"mips"}
@@ -78,7 +81,7 @@ jobs:
           echo "SQSH_COMP=$SQSH_COMP" >> $GITHUB_ENV
           echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
 
-      - name: 自动解包ROS.bin
+      - name: 自动解包ros.bin
         run: |
           sudo ./fmk_ros_only/extract-firmware.sh $FW_FILE
           if [ -d "$FW_FILE.extracted/rootfs" ]; then
