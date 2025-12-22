@@ -50,11 +50,11 @@ jobs:
             exit 1
           fi
 
-      - name: 自动打包（修正参数顺序，无报错）
+      - name: 自动打包（仅保留支持的选项，无报错）
         run: |
           cd ros.extracted/rootfs
-          # 正确语法：mksquashfs 源目录 输出文件 -选项1 -选项2 ...
-          sudo mksquashfs . ../rootfs.sqsh -b 262144 -comp xz -no-xattrs -preserve-permissions -all-root
+          # 仅使用工具明确支持的选项：-b（块大小）、-comp（压缩）、-no-xattrs、-all-root
+          sudo mksquashfs . ../rootfs.sqsh -b 262144 -comp xz -no-xattrs -all-root
           cd ../../
 
       - name: 自动重建启动头部
