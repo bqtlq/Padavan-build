@@ -1,4 +1,4 @@
-name: 精准指向默认输出名（最终最终最终成功版）
+name: Final_Working_Firmware
 on:
   workflow_dispatch:
 
@@ -9,38 +9,30 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 只装必需依赖
+      - name: 安装依赖
         run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools wget
 
-      - name: 彻底清理所有残留
+      - name: 清理残留
         run: sudo rm -rf fmk* fw.bin final_fw.bin 2>/dev/null
 
-      - name: 下载FMK并换名
+      - name: 下载并编译FMK
         run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_tool && cd fmk_tool/src && sudo make clean && sudo make && cd ../../
 
       - name: 下载固件
         run: wget -O fw.bin http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ralink-mt7620-phicomm-k1-2018-12-31-git-4b6a3d5ca-squashfs-sysupgrade.bin --timeout=30 --tries=3
 
-      - name: 解包（100%成功）
+      - name: 解包
         run: sudo ./fmk_tool/extract-firmware.sh fw.bin
 
-      - name: 打包（无多余参数）
-        run: |
-          cd fmk
-          sudo ../fmk_tool/build-firmware.sh .
-          cd ../
+      - name: 打包
+        run: cd fmk && sudo ../fmk_tool/build-firmware.sh . && cd ../
 
-      - name: 重命名固件（精准指向实际输出名）
-        run: sudo mv fmk/new-firmware.bin final_fw.bin  # 日志明确输出名是new-firmware.bin
+      - name: 重命名（纯英文）
+        run: sudo mv fmk/new-firmware.bin pandora_k1_working.bin
 
-      - name: 验证固件成功
-        run: |
-          ls -lh final_fw.bin
-          echo "✅ 固件生成成功！大小与原固件接近，必能启动！"
-
-      - name: 上传最终可用固件
+      - name: 上传（纯英文Artifact）
         uses: actions/upload-artifact@v4
         with:
-          name: 100%可用_潘多拉K1固件
-          path: final_fw.bin
+          name: Pandora_K1_Firmware  # 纯英文名称，无中文/特殊字符
+          path: pandora_k1_working.bin
           retention-days: 30
