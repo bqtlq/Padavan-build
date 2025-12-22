@@ -40,58 +40,55 @@ jobs:
             exit 1
           fi
 
-      - name: 自动扫描固件参数（彻底修复变量为空问题）
+      - name: 自动扫描固件参数（适配潘多拉固件的mkimage输出格式）
         run: |
+          set +e # 临时关闭严格模式，避免非关键命令失败导致退出
           # 初始化默认参数（优先保证变量非空）
           IMAGE_ARCH="mips"
-          IMAGE_ADDR="0x80060000"
-          IMAGE_ENTRY="0x80060000"
+          IMAGE_ADDR="0x80000000"
+          IMAGE_ENTRY="0x80000000"
           IMAGE_COMP="lzma"
           SQSH_COMP="xz"
           SQSH_BLOCK="262144"
 
-          # 扫描uImage头部参数（适配不同mkimage输出格式）
-          if mkimage -l $FW_FILE 2>/dev/null; then
-            # 提取架构（兼容Arch/Architecture关键词）
-            ARCH_LINE=$(mkimage -l $FW_FILE | grep -Ei "Arch|Architecture")
-            if [ -n "$ARCH_LINE" ]; then
-              IMAGE_ARCH=$(echo $ARCH_LINE | awk '{print $NF}' | sed 's/://g' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+          # 读取mkimage完整输出并保存
+          MKIMAGE_OUTPUT=$(mkimage -l $FW_FILE 2>/dev/null)
+          if [ -n "$MKIMAGE_OUTPUT" ]; then
+            # 从Image Type提取架构（潘多拉固件的架构在Image Type中）
+            IMAGE_ARCH=$(echo "$MKIMAGE_OUTPUT" | grep -i "Image Type" | sed -r 's/.*\(([a-z0-9]+) .*/\1/' | tr '[:upper:]' '[:lower:]')
+            # 提取Load Address并补0x前缀
+            RAW_ADDR=$(echo "$MKIMAGE_OUTPUT" | grep -i "Load Address" | awk '{print $NF}')
+            if [ -n "$RAW_ADDR" ]; then
+              IMAGE_ADDR="0x$RAW_ADDR"
             fi
-            # 提取加载地址（兼容Data Address/Load Address）
-            ADDR_LINE=$(mkimage -l $FW_FILE | grep -Ei "Data Address|Load Address")
-            if [ -n "$ADDR_LINE" ]; then
-              IMAGE_ADDR=$(echo $ADDR_LINE | awk '{print $NF}' | tr -d ' ')
+            # 提取Entry Point并补0x前缀
+            RAW_ENTRY=$(echo "$MKIMAGE_OUTPUT" | grep -i "Entry Point" | awk '{print $NF}')
+            if [ -n "$RAW_ENTRY" ]; then
+              IMAGE_ENTRY="0x$RAW_ENTRY"
             fi
-            # 提取入口地址
-            ENTRY_LINE=$(mkimage -l $FW_FILE | grep -Ei "Entry Point")
-            if [ -n "$ENTRY_LINE" ]; then
-              IMAGE_ENTRY=$(echo $ENTRY_LINE | awk '{print $NF}' | tr -d ' ')
-            fi
-            # 提取压缩格式
-            COMP_LINE=$(mkimage -l $FW_FILE | grep -Ei "Compression")
-            if [ -n "$COMP_LINE" ]; then
-              IMAGE_COMP=$(echo $COMP_LINE | awk '{print $NF}' | sed 's/://g' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-            fi
+            # 提取压缩格式（从Image Type中）
+            IMAGE_COMP=$(echo "$MKIMAGE_OUTPUT" | grep -i "Image Type" | sed -r 's/.*\(([a-z0-9]+) compressed\).*/\1/' | tr '[:upper:]' '[:lower:]')
           fi
+          set -e # 恢复严格模式
 
-          # 扫描Squashfs参数（修复字符污染）
+          # 扫描Squashfs参数（修复字符污染+兼容sed正则）
           if binwalk $FW_FILE | grep -i "Squashfs filesystem" 2>/dev/null; then
             # 提取压缩格式
             SQSH_COMP_LINE=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | grep -i "compression")
             if [ -n "$SQSH_COMP_LINE" ]; then
-              SQSH_COMP=$(echo $SQSH_COMP_LINE | sed -E 's/.*compression: *([a-z0-9]+).*/\1/' | tr -d ' ')
+              SQSH_COMP=$(echo $SQSH_COMP_LINE | sed -r 's/.*compression: *([a-z0-9]+).*/\1/' | tr -d ' ')
             fi
             # 提取块大小
             SQSH_BLOCK_LINE=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | grep -i "blocksize")
             if [ -n "$SQSH_BLOCK_LINE" ]; then
-              SQSH_BLOCK=$(echo $SQSH_BLOCK_LINE | sed -E 's/.*blocksize: *([0-9]+).*/\1/' | tr -d ' ')
+              SQSH_BLOCK=$(echo $SQSH_BLOCK_LINE | sed -r 's/.*blocksize: *([0-9]+).*/\1/' | tr -d ' ')
             fi
           fi
 
           # 最终参数校验（确保关键参数有效）
           IMAGE_ARCH=${IMAGE_ARCH:-"mips"}
-          IMAGE_ADDR=${IMAGE_ADDR:-"0x80060000"}
-          IMAGE_ENTRY=${IMAGE_ENTRY:-"0x80060000"}
+          IMAGE_ADDR=${IMAGE_ADDR:-"0x80000000"}
+          IMAGE_ENTRY=${IMAGE_ENTRY:-"0x80000000"}
           IMAGE_COMP=${IMAGE_COMP:-"lzma"}
           SQSH_COMP=${SQSH_COMP:-"xz"}
           SQSH_BLOCK=${SQSH_BLOCK:-"262144"}
@@ -101,7 +98,7 @@ jobs:
           echo "架构：$IMAGE_ARCH | 加载地址：$IMAGE_ADDR | 入口地址：$IMAGE_ENTRY | 内核压缩：$IMAGE_COMP"
           echo "文件系统压缩：$SQSH_COMP | 块大小：$SQSH_BLOCK"
 
-          # 存入环境变量
+          # 存入环境变量（强制写入，避免权限问题）
           echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
           echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
           echo "IMAGE_ENTRY=$IMAGE_ENTRY" >> $GITHUB_ENV
@@ -127,9 +124,9 @@ jobs:
           sudo mksquashfs . ../rootfs.sqsh -b $SQSH_BLOCK -comp $SQSH_COMP -no-xattrs -all-root
           cd ../../
 
-      - name: 重建uImage头部（添加镜像名，兼容所有mkimage版本）
+      - name: 重建uImage头部（匹配潘多拉固件的真实参数）
         run: |
-          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "ROS_Firmware" -d ros.extracted/rootfs.sqsh final_fw.bin
+          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "PandoraBox_ROS" -d ros.extracted/rootfs.sqsh final_fw.bin
 
       - name: 上传修改后的固件
         uses: actions/upload-artifact@v4
