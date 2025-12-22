@@ -1,9 +1,9 @@
 name: Ros_Bin_Auto_Trigger
 on:
-  workflow_dispatch: # 保留手动触发（备用）
+  workflow_dispatch:
   push:
     paths:
-      - '.github/workflows/openwrt.yml' # 仅修改该文件时自动触发
+      - '.github/workflows/openwrt.yml'
 
 jobs:
   build:
@@ -21,45 +21,84 @@ jobs:
       - name: 克隆FMK（唯一目录名）
         run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_ros_only && cd fmk_ros_only/src && sudo make clean && sudo make && cd ../../ && chmod +x fmk_ros_only/*.sh
 
-      - name: 复制ros.bin（容错处理）
+      - name: 复制固件文件（兼容任意bin固件，只需替换ros.bin）
         run: |
-          if [ -f ".github/workflows/ros.bin" ]; then
-            cp .github/workflows/ros.bin ./ros.bin
+          # 把ros.bin换成你新固件的文件名即可，比如new_fw.bin
+          FW_FILE="ros.bin"
+          if [ -f ".github/workflows/$FW_FILE" ]; then
+            cp .github/workflows/$FW_FILE ./$FW_FILE
+            echo "✅ 加载固件：$FW_FILE"
           else
-            echo "ERROR: 未找到ros.bin，请确认文件在.github/workflows/目录"
+            echo "ERROR: 未找到$FW_FILE，请确认文件在.github/workflows/目录"
             exit 1
           fi
 
-      - name: 固定参数（避免为空）
+      - name: 自动扫描参数+默认兜底（适配任意固件）
         run: |
-          echo "IMAGE_ARCH=mips" >> $GITHUB_ENV
-          echo "IMAGE_ADDR=0x80000000" >> $GITHUB_ENV
-          echo "SQSH_COMP=xz" >> $GITHUB_ENV
-          echo "SQSH_BLOCK=262144" >> $GITHUB_ENV
-          echo "SQSH_SIZE=$(stat -c %s ros.bin)" >> $GITHUB_ENV
+          FW_FILE="ros.bin" # 和上面的固件文件名保持一致
+          # 扫描uImage头部参数，失败则用默认
+          if mkimage -l $FW_FILE 2>/dev/null; then
+            IMAGE_ARCH=$(mkimage -l $FW_FILE | grep -i "Architecture" | awk '{print $3}' | sed 's/://g')
+            IMAGE_ADDR=$(mkimage -l $FW_FILE | grep -i "Data Address" | awk '{print $4}')
+            IMAGE_COMP=$(mkimage -l $FW_FILE | grep -i "Compression" | awk '{print $3}' | sed 's/://g')
+          else
+            IMAGE_ARCH="mips"
+            IMAGE_ADDR="0x80000000"
+            IMAGE_COMP="lzma"
+          fi
+          # 扫描Squashfs参数，失败则用默认
+          if binwalk -E $FW_FILE | grep -i "Squashfs filesystem" 2>/dev/null; then
+            SQSH_COMP=$(binwalk -E $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}')
+            SQSH_BLOCK=$(binwalk -E $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11) | sed 's/ bytes//g'}')
+          else
+            SQSH_COMP="xz"
+            SQSH_BLOCK="262144"
+          fi
+          # 固件体积必取真实值
+          SQSH_SIZE=$(stat -c %s $FW_FILE)
+          # 空值二次兜底（防止扫描结果为空）
+          IMAGE_ARCH=${IMAGE_ARCH:-"mips"}
+          IMAGE_ADDR=${IMAGE_ADDR:-"0x80000000"}
+          IMAGE_COMP=${IMAGE_COMP:-"lzma"}
+          SQSH_COMP=${SQSH_COMP:-"xz"}
+          SQSH_BLOCK=${SQSH_BLOCK:-"262144"}
+          # 输出扫描结果（方便调试）
+          echo "📌 最终参数："
+          echo "架构：$IMAGE_ARCH | 加载地址：$IMAGE_ADDR | 内核压缩：$IMAGE_COMP"
+          echo "文件系统压缩：$SQSH_COMP | 块大小：$SQSH_BLOCK | 固件体积：$SQSH_SIZE"
+          # 存入环境变量
+          echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
+          echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
+          echo "IMAGE_COMP=$IMAGE_COMP" >> $GITHUB_ENV
+          echo "SQSH_COMP=$SQSH_COMP" >> $GITHUB_ENV
+          echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
+          echo "SQSH_SIZE=$SQSH_SIZE" >> $GITHUB_ENV
+          echo "FW_FILE=$FW_FILE" >> $GITHUB_ENV
 
-      - name: 自动解包（兼容目录）
+      - name: 自动解包（兼容任意固件）
         run: |
-          sudo ./fmk_ros_only/extract-firmware.sh ros.bin
-          if [ -d "fmk/rootfs" ]; then
+          sudo ./fmk_ros_only/extract-firmware.sh $FW_FILE
+          if [ -d "$FW_FILE.extracted/rootfs" ]; then
+            mv $FW_FILE.extracted ros.extracted
+          elif [ -d "fmk/rootfs" ]; then
             mv fmk ros.extracted
-          elif [ -d "ros.bin.extracted/rootfs" ]; then
-            mv ros.bin.extracted ros.extracted
           else
-            echo "ERROR: 解包失败"
+            echo "ERROR: 固件解包失败，非uImage+Squashfs架构！"
             exit 1
           fi
 
-      - name: 自动打包（仅保留支持的选项，无报错）
+      - name: 自动打包（用扫描的真实参数）
         run: |
           cd ros.extracted/rootfs
-          sudo mksquashfs . ../rootfs.sqsh -b 262144 -comp xz -no-xattrs -all-root
+          sudo mksquashfs . ../rootfs.sqsh -b $SQSH_BLOCK -comp $SQSH_COMP -no-xattrs -all-root
           cd ../../
 
-      - name: 自动重建启动头部
-        run: sudo mkimage -A mips -O linux -T kernel -C lzma -a 0x80000000 -e 0x80000000 -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
+      - name: 自动重建启动头部（匹配扫描参数）
+        run: |
+          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ADDR -d ros.extracted/rootfs.sqsh final_fw.bin
+          sudo truncate -s $SQSH_SIZE final_fw.bin
 
-      - name: 上传固件（默认ZIP压缩，移除无效参数消除警告）
+      - name: 上传固件（ZIP压缩，无警告）
         uses: actions/upload-artifact@v4
         with:
           name: Auto_Trigger_Working_Firmware
