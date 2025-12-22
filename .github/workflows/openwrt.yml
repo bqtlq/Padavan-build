@@ -12,24 +12,29 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装官方依赖
+      - name: 安装官方依赖（新增unzip适配ZIP包）
         run: |
           sudo apt update -y
-          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
-          echo "✅ 依赖安装完成"
+          # 新增unzip工具，用于解压ZIP格式的FMK包
+          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget unzip
+          echo "✅ 依赖安装完成（含unzip，适配ZIP镜像）"
 
-      - name: 终极清理（避免任何冲突）
+      - name: 终极清理（含ZIP包残留）
         run: |
-          sudo rm -rf fmk firmware-mod-kit final_fw.bin ros.bin padavan_source 2>/dev/null
-          echo "✅ 残留清理完成"
+          sudo rm -rf fmk firmware-mod-kit final_fw.bin ros.bin padavan_source firmware-mod-kit-v0.99.zip 2>/dev/null
+          echo "✅ 残留清理完成（含ZIP包）"
 
-      - name: 下载FMK官方完整包（含old脚本，无文件缺失）
+      - name: 下载FMK ZIP格式镜像（含old脚本）
         run: |
-          wget https://github.com/rampageX/firmware-mod-kit/archive/refs/tags/0.99.tar.gz -O firmware-mod-kit-v0.99.tar.gz
-          tar -zxvf firmware-mod-kit-v0.99.tar.gz
-          mv firmware-mod-kit-0.99 fmk  # 适配你提供的镜像目录名
-          rm firmware-mod-kit-v0.99.tar.gz
-          echo "✅ 官方完整包下载解压完成，含old-extract.sh/old-build.sh"
+          # 下载用户提供的ZIP格式镜像
+          wget https://github.com/rampageX/firmware-mod-kit/archive/refs/tags/0.99.zip -O firmware-mod-kit-v0.99.zip
+          # 解压ZIP包（-q静默模式，-o覆盖已存在文件）
+          unzip -q -o firmware-mod-kit-v0.99.zip
+          # 适配解压后的目录名（ZIP包解压后目录为firmware-mod-kit-0.99，与tar.gz一致）
+          mv firmware-mod-kit-0.99 fmk
+          # 删除ZIP包节省空间
+          rm -f firmware-mod-kit-v0.99.zip
+          echo "✅ ZIP包下载解压完成，含old-extract.sh/old-build.sh"
 
       - name: 给old脚本加执行权限
         run: |
@@ -61,25 +66,20 @@ jobs:
           fi
           echo "✅ old脚本解包完成，适配Padavan定制格式"
 
-      # -------------------------- 新增：保留+上传源码 --------------------------
       - name: 复制解包后源码（完整保留rootfs/kernel）
         run: |
-          # 创建独立源码目录，避免与打包流程冲突
           mkdir -p padavan_source
-          # 复制核心源码目录（rootfs=根文件系统，kernel=内核，其他为辅助文件）
           sudo cp -r fmk/rootfs fmk/kernel fmk/squashfs-root fmk/*.img padavan_source/ 2>/dev/null
-          # 修复源码目录权限（方便本地下载后编辑）
           sudo chmod -R 755 padavan_source
           echo "✅ 源码已完整复制到 padavan_source 目录"
-          # 验证源码目录结构
           ls -l padavan_source
-      # -------------------------- 新增：上传源码Artifact --------------------------
+
       - name: 上传解包后完整源码
         uses: actions/upload-artifact@v4
         with:
-          name: Padavan_Unpacked_Source  # 源码压缩包名称
-          path: padavan_source/          # 要上传的源码目录
-          retention-days: 30             # 保留30天，与固件一致
+          name: Padavan_Unpacked_Source
+          path: padavan_source/
+          retention-days: 30
 
       - name: 用官方old-build.sh打包（确保开机）
         run: |
