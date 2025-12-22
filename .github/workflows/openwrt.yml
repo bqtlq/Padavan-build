@@ -1,57 +1,66 @@
-name: Ros_Bin_Auto_Run_Final
+name: Ros_Bin_Auto_Trigger
+# 改为自动触发：提交代码到main分支时运行
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]  # 若你的主分支是其他名称（如master），请修改这里
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出仓库
+      - name: 检出仓库（自动拉取最新代码）
         uses: actions/checkout@v4
 
-      - name: 安装工具
+      - name: 安装必需工具
         run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
 
-      - name: 彻底清理残留
+      - name: 彻底清理残留（避免冲突）
         run: sudo rm -rf fmk* fmk_ros_only* ros.extracted ros.bin.extracted final_fw.bin 2>/dev/null
 
       - name: 克隆FMK（唯一目录名）
         run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_ros_only && cd fmk_ros_only/src && sudo make clean && sudo make && cd ../../ && chmod +x fmk_ros_only/*.sh
 
-      - name: 复制ros.bin
-        run: cp .github/workflows/ros.bin ./ros.bin || echo "ros.bin已存在"
-
-      - name: 硬指定参数（避免为空，自动适配潘多拉）
+      - name: 复制ros.bin（容错处理）
         run: |
-          # 直接用潘多拉K1已知有效参数，不用扫描
+          if [ -f ".github/workflows/ros.bin" ]; then
+            cp .github/workflows/ros.bin ./ros.bin
+          else
+            echo "ERROR: 未找到ros.bin，请确认文件在.github/workflows/目录"
+            exit 1
+          fi
+
+      - name: 固定参数（避免为空，确保打包成功）
+        run: |
           echo "IMAGE_ARCH=mips" >> $GITHUB_ENV
           echo "IMAGE_ADDR=0x80000000" >> $GITHUB_ENV
-          echo "SQSH_COMP=xz" >> $GITHUB_ENV  # 固定xz压缩，原固件默认
-          echo "SQSH_BLOCK=262144" >> $GITHUB_ENV  # 固定256K块大小
+          echo "SQSH_COMP=xz" >> $GITHUB_ENV
+          echo "SQSH_BLOCK=262144" >> $GITHUB_ENV
           echo "SQSH_SIZE=$(stat -c %s ros.bin)" >> $GITHUB_ENV
 
-      - name: 解包（自动兼容目录）
+      - name: 自动解包（兼容目录）
         run: |
           sudo ./fmk_ros_only/extract-firmware.sh ros.bin
           if [ -d "fmk/rootfs" ]; then
             mv fmk ros.extracted
           elif [ -d "ros.bin.extracted/rootfs" ]; then
             mv ros.bin.extracted ros.extracted
+          else
+            echo "ERROR: 解包失败"
+            exit 1
           fi
 
-      - name: 打包（固定参数，自动运行）
+      - name: 自动打包（固定参数，无报错）
         run: |
           cd ros.extracted/rootfs
-          # 明确指定压缩方式，不会再误判参数
           sudo mksquashfs . ../rootfs.sqsh -comp xz -b 262144 -no-xattrs -preserve-permissions -all-root
           cd ../../
 
-      - name: 重建启动头部（自动适配）
+      - name: 自动重建启动头部
         run: sudo mkimage -A mips -O linux -T kernel -C lzma -a 0x80000000 -e 0x80000000 -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
 
       - name: 自动上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: Ros_Bin_Auto_Working_Firmware
+          name: Auto_Trigger_Working_Firmware
           path: final_fw.bin
           retention-days: 30
