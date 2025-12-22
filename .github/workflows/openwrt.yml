@@ -1,22 +1,115 @@
-- name: 精准解包潘多拉固件（基于binwalk偏移）
-  run: |
-    mkdir -p firmware_split rootfs
-    # 1. 分离uImage头部（0x0开始，64字节，对应binwalk的header size: 64 bytes）
-    dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=64 2>/dev/null
-    # 2. 提取Squashfs文件系统（从0x162FAA偏移开始，跳过头部和内核）
-    dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$((0x162FAA)) 2>/dev/null
-    # 3. 验证Squashfs镜像有效性
-    file firmware_split/rootfs.squashfs || { echo "Squashfs镜像无效"; exit 1; }
-    # 4. 解包到rootfs目录
-    unsquashfs -d rootfs firmware_split/rootfs.squashfs || { echo "解包失败"; exit 1; }
-    ls -l rootfs/  # 确认解包成功
+name: 精准解包删除PPPoE并重新打包PandoraBox固件（MT7620-K1专用）
+on:
+  workflow_dispatch:  # 手动触发（推荐）
+  push:
+    paths:
+      - '.github/workflows/openwrt.yml'  # 仅修改此文件时触发推送
 
-- name: 重新打包+合并固件（保留原头部）
-  run: |
-    # 1. 打包新的Squashfs根文件系统（参数与原固件一致：xz压缩+256K块）
-    mksquashfs rootfs/ firmware_split/new_rootfs.squashfs -comp xz -b 262144 -noappend -all-root -processors 2
-    # 2. 合并uImage头部+新根文件系统（必须按原顺序，否则无法刷机）
-    cat firmware_split/uimage_header.bin firmware_split/new_rootfs.squashfs > Modified_PandoraBox.bin
-    # 3. 验证最终固件
-    file Modified_PandoraBox.bin  # 应显示"uImage header"
-    ls -l Modified_PandoraBox.bin
+jobs:
+  modify-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      ###########################################################################
+      # 1. 检出仓库代码
+      ###########################################################################
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      ###########################################################################
+      # 2. 安装依赖工具（已验证兼容）
+      ###########################################################################
+      - name: 安装核心依赖工具
+        run: |
+          sudo apt update -y
+          sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file
+          # 验证工具安装成功（输出版本号，确保可用）
+          echo "=== 工具版本验证 ==="
+          mksquashfs -version | head -n1
+          unsquashfs -version | head -n1
+          binwalk -v | head -n1
+          file --version | head -n1
+
+      ###########################################################################
+      # 3. 加载固件并验证存在性（适配PandoraBox.bin文件名）
+      ###########################################################################
+      - name: 加载PandoraBox固件（适配实际文件名）
+        run: |
+          # 固件路径：匹配你仓库中的PandoraBox.bin
+          FIRMWARE_PATH=".github/workflows/PandoraBox.bin"
+          cp "$FIRMWARE_PATH" ./PandoraBox.bin || { echo "ERROR: 固件文件不存在！请检查路径是否为$FIRMWARE_PATH"; exit 1; }
+          
+          # 验证固件文件大小和格式
+          echo "=== 固件信息 ==="
+          ls -lh ./PandoraBox.bin
+          file ./PandoraBox.bin  # 应输出"uImage header"，确认格式正确
+          if ! file ./PandoraBox.bin | grep -q "uImage header"; then
+            echo "ERROR: 固件不是uImage格式，与偏移配置不匹配！"
+            exit 1
+          fi
+
+      ###########################################################################
+      # 4. 精准解包固件（基于binwalk获取的偏移，核心步骤）
+      ###########################################################################
+      - name: 精准解包uImage格式固件
+        run: |
+          mkdir -p firmware_split rootfs  # 创建工作目录
+          echo "=== 开始精准解包 ==="
+          
+          # 关键参数：从binwalk结果获取，适配K1机型固件
+          UIMAGE_HEADER_SIZE=64          # 0x0开始，uImage头部大小（binwalk显示header size: 64 bytes）
+          SQUASHFS_OFFSET=$((0x162FAA))  # Squashfs文件系统起始偏移（binwalk显示0x162FAA）
+          
+          # 步骤1：分离uImage头部（必须保留，路由器识别固件的关键）
+          dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=$UIMAGE_HEADER_SIZE 2>/dev/null
+          echo "✅ 已分离uImage头部（$UIMAGE_HEADER_SIZE字节）"
+          
+          # 步骤2：提取纯Squashfs根文件系统（跳过头部和内核，直接定位到文件系统）
+          dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
+          echo "✅ 已提取Squashfs镜像（偏移0x$((SQUASHFS_OFFSET))）"
+          
+          # 步骤3：验证Squashfs镜像有效性（避免偏移错误导致解包失败）
+          if ! file firmware_split/rootfs.squashfs | grep -q "Squashfs filesystem"; then
+            echo "ERROR: 提取的Squashfs镜像无效！请检查偏移是否正确"
+            file firmware_split/rootfs.squashfs
+            exit 1
+          fi
+          echo "✅ Squashfs镜像验证有效"
+          
+          # 步骤4：解包Squashfs到rootfs目录（后续删除插件用）
+          unsquashfs -d rootfs firmware_split/rootfs.squashfs || { echo "ERROR: Squashfs解包失败"; exit 1; }
+          echo "✅ Squashfs解包完成，根文件系统目录：rootfs/"
+          ls -l rootfs/ | head -n10  # 输出前10个文件，确认解包成功
+
+      ###########################################################################
+      # 5. 彻底删除PPPoE相关组件（容错处理，不遗漏）
+      ###########################################################################
+      - name: 彻底删除PPPoE组件
+        run: |
+          cd rootfs || { echo "ERROR: 进入根文件系统目录失败"; exit 1; }
+          echo "=== 开始删除PPPoE组件 ==="
+          
+          # 5.1 删除PPPoE二进制执行文件
+          rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe* ./usr/sbin/pppd* 2>/dev/null || true
+          echo "✅ 删除PPPoE二进制文件"
+          
+          # 5.2 删除PPPoE配置文件、启动脚本、拨号脚本
+          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe ./etc/ppp/pppoe.conf 2>/dev/null || true
+          rm -f ./etc/ppp/options.pppoe ./etc/hotplug.d/net/*pppoe* 2>/dev/null || true
+          echo "✅ 删除PPPoE配置与启动脚本"
+          
+          # 5.3 删除PPPoE相关库文件和opkg包信息
+          rm -rf ./usr/lib/opkg/info/pppoe* ./usr/lib/opkg/info/ppp-mod-pppoe* 2>/dev/null || true
+          rm -f ./usr/lib/libpppoe* 2>/dev/null || true
+          echo "✅ 删除PPPoE库文件与包信息"
+          
+          # 5.4 清理opkg状态记录（避免系统识别残留）
+          sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
+          sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
+          sed -i '/Package: pppd/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
+          echo "✅ 清理opkg状态记录"
+          
+          # 5.5 查找并删除所有残留文件（确保无遗漏）
+          echo "=== 查找残留PPPoE文件 ==="
+          残留文件=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
+          if [ -n "$残留文件" ]; then
+            find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/nul
