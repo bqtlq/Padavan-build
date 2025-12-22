@@ -26,7 +26,7 @@ jobs:
           sudo make clean && sudo make || { echo "ERROR: FMK编译失败"; exit 1; }
           cd ../../ && chmod +x fmk_ros_only/*.sh
 
-      - name: 定义固件文件名（匹配你上传的ros.bin，小写）
+      - name: 定义固件文件名（匹配上传的ros.bin）
         run: echo "FW_FILE=ros.bin" >> $GITHUB_ENV
 
       - name: 检查并复制固件（从.github/workflows/目录读取）
@@ -40,36 +40,38 @@ jobs:
             exit 1
           fi
 
-      - name: 自动扫描固件参数（适配ros.bin）
+      - name: 自动扫描固件参数（修复字符污染问题）
         run: |
           # 扫描uImage头部参数
           if mkimage -l $FW_FILE 2>/dev/null; then
-            IMAGE_ARCH=$(mkimage -l $FW_FILE | grep -i "Architecture" | awk '{print $3}' | sed 's/://g')
-            IMAGE_ADDR=$(mkimage -l $FW_FILE | grep -i "Data Address" | awk '{print $4}')
-            IMAGE_ENTRY=$(mkimage -l $FW_FILE | grep -i "Entry Point" | awk '{print $4}')
-            IMAGE_COMP=$(mkimage -l $FW_FILE | grep -i "Compression" | awk '{print $3}' | sed 's/://g')
+            IMAGE_ARCH=$(mkimage -l $FW_FILE | grep -i "Architecture" | awk '{print $3}' | sed 's/://g' | tr -d ' ')
+            IMAGE_ADDR=$(mkimage -l $FW_FILE | grep -i "Data Address" | awk '{print $4}' | tr -d ' ')
+            IMAGE_ENTRY=$(mkimage -l $FW_FILE | grep -i "Entry Point" | awk '{print $4}' | tr -d ' ')
+            IMAGE_COMP=$(mkimage -l $FW_FILE | grep -i "Compression" | awk '{print $3}' | sed 's/://g' | tr -d ' ')
           else
             IMAGE_ARCH="mips"
             IMAGE_ADDR="0x80060000"
             IMAGE_ENTRY="0x80060000"
             IMAGE_COMP="lzma"
           fi
-          # 扫描Squashfs参数（修复管道语法错误）
+          # 扫描Squashfs参数（修复冒号/空格污染）
           if binwalk $FW_FILE | grep -i "Squashfs filesystem" 2>/dev/null; then
-            SQSH_COMP=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}')
-            SQSH_BLOCK=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11)}' | sed 's/ bytes//g')
+            # 提取压缩格式并清理冒号、空格等多余字符
+            SQSH_COMP=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print $i}' | sed 's/compression://g' | tr -d ' :')
+            # 提取块大小并清理空格、单位
+            SQSH_BLOCK=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print $i}' | sed 's/blocksize://g; s/ bytes//g' | tr -d ' ')
           else
             SQSH_COMP="xz"
             SQSH_BLOCK="262144"
           fi
-          # 参数兜底
-          IMAGE_ARCH=${IMAGE_ARCH:-"mips"}
-          IMAGE_ADDR=${IMAGE_ADDR:-"0x80060000"}
-          IMAGE_ENTRY=${IMAGE_ENTRY:-"0x80060000"}
-          IMAGE_COMP=${IMAGE_COMP:-"lzma"}
-          SQSH_COMP=${SQSH_COMP:-"xz"}
-          SQSH_BLOCK=${SQSH_BLOCK:-"262144"}
-          # 输出参数
+          # 参数兜底+最终清理（确保无多余字符）
+          IMAGE_ARCH=${IMAGE_ARCH:-"mips"} | tr -d ' '
+          IMAGE_ADDR=${IMAGE_ADDR:-"0x80060000"} | tr -d ' '
+          IMAGE_ENTRY=${IMAGE_ENTRY:-"0x80060000"} | tr -d ' '
+          IMAGE_COMP=${IMAGE_COMP:-"lzma"} | tr -d ' :'
+          SQSH_COMP=${SQSH_COMP:-"xz"} | tr -d ' :'
+          SQSH_BLOCK=${SQSH_BLOCK:-"262144"} | tr -d ' '
+          # 输出参数（方便调试）
           echo "📌 固件参数："
           echo "架构：$IMAGE_ARCH | 加载地址：$IMAGE_ADDR | 入口地址：$IMAGE_ENTRY | 内核压缩：$IMAGE_COMP"
           echo "文件系统压缩：$SQSH_COMP | 块大小：$SQSH_BLOCK"
@@ -93,7 +95,7 @@ jobs:
             exit 1
           fi
 
-      - name: 自动打包rootfs
+      - name: 自动打包rootfs（修复压缩格式识别）
         run: |
           cd ros.extracted/rootfs
           sudo mksquashfs . ../rootfs.sqsh -b $SQSH_BLOCK -comp $SQSH_COMP -no-xattrs -all-root
