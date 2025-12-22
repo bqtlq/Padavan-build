@@ -12,29 +12,27 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装FMK官方依赖（按文档要求）
+      - name: 安装FMK官方依赖
         run: |
           sudo apt update -y
-          # 严格遵循文档的依赖列表
           sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk automake autoconf libtool pkg-config
           echo "✅ 官方依赖安装完成"
 
-      - name: 清理旧FMK（文档强调避免残留）
-        run: sudo rm -rf firmware-mod-kit fmk* ros.extracted final_fw.bin 2>/dev/null
+      - name: 彻底清理FMK残留（关键修复：删除fmk目录）
+        run: sudo rm -rf firmware-mod-kit fmk ros.extracted final_fw.bin 2>/dev/null
 
-      - name: 克隆FMK官方仓库（文档指定源）
+      - name: 克隆FMK官方仓库
         run: |
           git clone https://github.com/rampageX/firmware-mod-kit.git fmk
           cd fmk
-          # 按文档执行配置编译（解决兼容性）
           ./configure && make
           chmod +x extract-firmware.sh build-firmware.sh
           cd ../
           echo "✅ FMK官方工具编译完成"
 
-      - name: 复制固件（换固件仅改这里的文件名）
+      - name: 复制固件（换固件仅改这里）
         run: |
-          FW_NAME="ros.bin" # 换固件时只改这个文件名即可
+          FW_NAME="ros.bin"
           if [ -f ".github/workflows/$FW_NAME" ]; then
             cp .github/workflows/$FW_NAME ./$FW_NAME
             echo "✅ 加载固件：$FW_NAME"
@@ -44,24 +42,23 @@ jobs:
           fi
           echo "FW_NAME=$FW_NAME" >> $GITHUB_ENV
 
-      - name: 官方标准解包（按文档调用extract-firmware.sh）
+      - name: 解包前删除fmk目录（解决冲突）
+        run: sudo rm -rf fmk 2>/dev/null # 解包前确保fmk目录不存在
+
+      - name: 官方标准解包
         run: |
-          # 文档要求：直接用FMK的extract-firmware.sh，自动识别固件格式
           sudo ./fmk/extract-firmware.sh $FW_NAME
-          # 文档说明：解包后默认生成fmk目录，包含rootfs和kernel
           if [ ! -d "fmk/rootfs" ]; then
-            echo "ERROR: 解包失败，固件非FMK支持格式（uImage/Squashfs）"
+            echo "ERROR: 解包失败，固件非FMK支持格式"
             exit 1
           fi
           echo "✅ 按官方流程解包完成"
 
-      - name: 官方标准打包（按文档调用build-firmware.sh）
+      - name: 官方标准打包
         run: |
-          # 文档核心：用build-firmware.sh自动打包，无需手动指定参数
           cd fmk
           sudo ./build-firmware.sh
           cd ../
-          # 文档说明：打包后生成fmk/firmware.bin（原参数匹配的固件）
           cp fmk/firmware.bin final_fw.bin
           echo "✅ 按官方流程打包完成，生成final_fw.bin"
 
