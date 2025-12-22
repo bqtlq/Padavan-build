@@ -1,4 +1,4 @@
-name: FMK自动解包+打包（潘多拉稳定版，贴合论坛思路）
+name: FMK自动解包+打包（潘多拉稳定版，修复目录冲突）
 on:
   workflow_dispatch:  # 手动触发
   push:
@@ -15,7 +15,6 @@ jobs:
       - name: 安装依赖（含FMK必需工具）
         run: |
           sudo apt update -y
-          # 安装帖子推荐的全套工具：FMK依赖+u-boot-tools+squashfs-tools
           sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev \
             binwalk squashfs-tools u-boot-tools mtd-utils file wget
           echo "=== 工具安装完成 ==="
@@ -41,9 +40,12 @@ jobs:
           file PandoraBox.bin
           echo "=== 固件准备完成 ==="
 
-      - name: 用FMK自动解包（避免手动偏移误差，帖子核心步骤）
+      - name: 清理残留目录+FMK自动解包（修复冲突）
         run: |
+          # 核心修复：先删除已有目录，避免冲突
+          rm -rf fmk_work
           mkdir -p fmk_work
+          
           echo "=== FMK自动解包固件 ==="
           # 帖子推荐命令：自动识别TRX/uImage格式，精准分离各部分
           ./fmk/extract-firmware.sh PandoraBox.bin fmk_work
