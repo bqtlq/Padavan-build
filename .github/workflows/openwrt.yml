@@ -1,93 +1,22 @@
-name: 解包删除PPPoE并重新打包PandoraBox固件
+- name: 精准解包潘多拉固件（基于binwalk偏移）
+  run: |
+    mkdir -p firmware_split rootfs
+    # 1. 分离uImage头部（0x0开始，64字节，对应binwalk的header size: 64 bytes）
+    dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=64 2>/dev/null
+    # 2. 提取Squashfs文件系统（从0x162FAA偏移开始，跳过头部和内核）
+    dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$((0x162FAA)) 2>/dev/null
+    # 3. 验证Squashfs镜像有效性
+    file firmware_split/rootfs.squashfs || { echo "Squashfs镜像无效"; exit 1; }
+    # 4. 解包到rootfs目录
+    unsquashfs -d rootfs firmware_split/rootfs.squashfs || { echo "解包失败"; exit 1; }
+    ls -l rootfs/  # 确认解包成功
 
-on:
-  workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/openwrt.yml'
-
-jobs:
-  modify-firmware:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
-
-      - name: 安装依赖工具（修正包名）
-        run: |
-          sudo apt update -y
-          # 替换jffs2-tools为mtd-utils（包含jffs2相关工具），保留核心解包打包工具
-          sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file
-          # 验证关键工具
-          mksquashfs -version
-          unsquashfs -version
-          binwalk -v
-          file --version
-
-      - name: 加载并分析PandoraBox.bin固件
-        run: |
-          # 复制固件到工作目录
-          cp .github/workflows/PandoraBox.bin ./PandoraBox.bin || { echo "固件文件不存在！"; exit 1; }
-          ls -l ./PandoraBox.bin
-          # 分析固件类型和结构（输出关键信息）
-          file ./PandoraBox.bin
-          binwalk -x none ./PandoraBox.bin > firmware_structure.log
-          cat firmware_structure.log
-
-      - name: 手动解包固件（替代binwalk自动解包，更稳定）
-        run: |
-          # 创建解包目录
-          mkdir -p firmware_split rootfs
-          # 步骤1：分离TRX固件头部（潘多拉常见TRX格式）
-          dd if=PandoraBox.bin of=firmware_split/trx_header.bin bs=32 count=1 2>/dev/null
-          # 步骤2：提取TRX中的rootfs镜像（从32字节偏移开始）
-          dd if=PandoraBox.bin of=firmware_split/rootfs_raw.bin bs=1 skip=32 2>/dev/null
-          # 步骤3：用binwalk找squashfs镜像的起始偏移
-          SQUASHFS_OFFSET=$(binwalk -y squashfs firmware_split/rootfs_raw.bin | grep -oP '^\d+' | head -n1)
-          if [ -z "$SQUASHFS_OFFSET" ]; then
-            echo "未检测到squashfs偏移，直接使用原始rootfs"
-            SQUASHFS_OFFSET=0
-          fi
-          # 步骤4：提取纯squashfs镜像并解包
-          dd if=firmware_split/rootfs_raw.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
-          unsquashfs -d rootfs firmware_split/rootfs.squashfs || { echo "squashfs解包失败"; exit 1; }
-          # 验证根文件系统
-          ls -l rootfs/ || { echo "根文件系统目录为空"; exit 1; }
-
-      - name: 删除PPPoE组件（极致容错）
-        run: |
-          cd rootfs || { echo "进入rootfs失败"; exit 1; }
-          # 所有删除操作加|| true，不存在的文件不中断流程
-          rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe* || true
-          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe ./etc/ppp/pppoe.conf || true
-          rm -f ./usr/lib/opkg/info/pppoe* ./usr/lib/opkg/info/ppp-mod-pppoe* || true
-          # 清理opkg状态记录（容错）
-          sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          # 查找并删除残留（屏蔽错误）
-          find . -name "*pppoe*" -exec rm -rf {} \; 2>/dev/null || true
-          cd ../
-
-      - name: 重新打包squashfs根文件系统
-        run: |
-          # 用潘多拉兼容参数打包，强制root权限
-          mksquashfs rootfs/ firmware_split/new_rootfs.squashfs -comp lzma -b 262144 -noappend -all-root -processors 2
-          ls -l firmware_split/new_rootfs.squashfs
-
-      - name: 合并生成可刷机固件
-        run: |
-          # 合并TRX头部+新rootfs
-          cat firmware_split/trx_header.bin firmware_split/new_rootfs.squashfs > Modified_PandoraBox.bin
-          # 验证新固件
-          ls -l Modified_PandoraBox.bin
-          binwalk Modified_PandoraBox.bin
-          file Modified_PandoraBox.bin
-
-      - name: 上传产物（固件+调试日志）
-        uses: actions/upload-artifact@v4
-        with:
-          name: PandoraBox_Modified
-          path: |
-            Modified_PandoraBox.bin
-            firmware_structure.log
-          retention-days: 30
+- name: 重新打包+合并固件（保留原头部）
+  run: |
+    # 1. 打包新的Squashfs根文件系统（参数与原固件一致：xz压缩+256K块）
+    mksquashfs rootfs/ firmware_split/new_rootfs.squashfs -comp xz -b 262144 -noappend -all-root -processors 2
+    # 2. 合并uImage头部+新根文件系统（必须按原顺序，否则无法刷机）
+    cat firmware_split/uimage_header.bin firmware_split/new_rootfs.squashfs > Modified_PandoraBox.bin
+    # 3. 验证最终固件
+    file Modified_PandoraBox.bin  # 应显示"uImage header"
+    ls -l Modified_PandoraBox.bin
