@@ -9,11 +9,20 @@ jobs:
       - name: 检出仓库（拉取本地ros.bin）
         uses: actions/checkout@v4
 
-      - name: 安装全套工具（扫描+打包）
+      - name: 安装工具（去掉firmware-mod-kit的apt安装）
         run: |
           sudo apt update -y
-          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk firmware-mod-kit
-          echo "✅ 工具安装完成"
+          # 删掉firmware-mod-kit，后续手动克隆编译
+          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
+          echo "✅ 基础工具安装完成"
+
+      - name: 手动克隆+编译FMK（替代apt安装）
+        run: |
+          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_tool
+          cd fmk_tool/src
+          sudo make clean && sudo make
+          cd ../../
+          echo "✅ FMK手动编译完成"
 
       - name: 清理残留文件
         run: sudo rm -rf fmk* ros.bin.extracted final_fw.bin 2>/dev/null
@@ -59,12 +68,17 @@ jobs:
           echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
           echo "SQSH_SIZE=$SQSH_SIZE" >> $GITHUB_ENV
 
-      - name: 解包ros.bin
+      - name: 用手动编译的FMK解包ros.bin
         run: |
-          sudo extract-firmware.sh ros.bin
-          if [ ! -d "ros.bin.extracted/rootfs" ]; then
+          # 改用手动克隆的FMK脚本解包，而非系统命令
+          sudo ./fmk_tool/extract-firmware.sh ros.bin
+          if [ ! -d "ros.bin.extracted/rootfs" ] && [ ! -d "fmk/rootfs" ]; then
             echo "ERROR: ros.bin解包失败，非uImage+Squashfs架构！"
             exit 1
+          fi
+          # 兼容FMK的解包目录（旧版会生成fmk目录）
+          if [ -d "fmk/rootfs" ]; then
+            mv fmk ros.bin.extracted
           fi
           echo "✅ ros.bin解包完成"
 
@@ -75,11 +89,16 @@ jobs:
           cd ../../
           echo "✅ Squashfs打包完成"
 
-      - name: 重建uImage头部
+      - name: 用手动编译的FMK重建固件+补全uImage头部
         run: |
+          cd ros.bin.extracted
+          # 先调用FMK的build脚本，再用mkimage补全头部参数
+          sudo ../fmk_tool/build-firmware.sh .
+          cd ../
+          # 用扫描的参数重新生成uImage头部（确保参数匹配）
           sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "$IMAGE_NAME" -d ros.bin.extracted/rootfs-new.squashfs final_fw.bin
           sudo truncate -s $SQSH_SIZE final_fw.bin # 匹配原固件体积
-          echo "✅ uImage头部重建完成"
+          echo "✅ 固件重建+头部补全完成"
 
       - name: 验证最终固件
         run: |
