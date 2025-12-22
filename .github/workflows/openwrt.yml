@@ -1,4 +1,4 @@
-name: FMK自动解包+打包（潘多拉终极稳定版）
+name: 旧版FMK自动解包+打包（潘多拉兼容版）
 on:
   workflow_dispatch:  # 手动触发
   push:
@@ -12,19 +12,19 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装依赖（含FMK必需工具）
+      - name: 安装依赖（适配旧版FMK）
         run: |
           sudo apt update -y
           sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev \
             binwalk squashfs-tools u-boot-tools mtd-utils file wget
           echo "=== 工具安装完成 ==="
 
-      - name: 下载并编译Firmware Mod Kit（帖子核心工具）
+      - name: 下载并编译旧版FMK（适配参数）
         run: |
           echo "=== 下载FMK工具 ==="
           git clone https://github.com/rampageX/firmware-mod-kit.git fmk
           cd fmk/src
-          # 编译FMK（帖子强调必须编译才能使用）
+          # 编译旧版FMK（不添加额外参数，保持原生兼容）
           make clean && make
           cd ../../
           echo "=== FMK编译完成 ==="
@@ -40,34 +40,35 @@ jobs:
           file PandoraBox.bin
           echo "=== 固件准备完成 ==="
 
-      - name: 超级清理+FMK自动解包（终极修复冲突）
+      - name: 清理+旧版FMK解包（无兼容报错）
         run: |
-          echo "=== 彻底清理残留目录 ==="
-          # 终极清理：sudo强制删除，确保无任何残留
-          sudo rm -rf fmk_work 2>/dev/null
-          # 不提前创建目录，让FMK自动创建（彻底避免存在性检测）
+          echo "=== 彻底清理残留文件 ==="
+          sudo rm -rf PandoraBox.bin.extracted fmk_work 2>/dev/null
           
-          echo "=== FMK自动解包固件 ==="
-          # 帖子推荐命令，添加-v参数输出详细日志，方便排错
-          ./fmk/extract-firmware.sh -v PandoraBox.bin fmk_work
+          echo "=== 旧版FMK自动解包（原生参数） ==="
+          # 旧版FMK仅支持：extract-firmware.sh <固件文件>，默认解包到 <固件名>.extracted
+          ./fmk/extract-firmware.sh PandoraBox.bin
           
-          # 验证解包成功（帖子强调检查rootfs目录）
-          if [ ! -d "fmk_work/rootfs" ]; then
+          # 验证解包成功（旧版FMK默认输出目录：PandoraBox.bin.extracted）
+          if [ ! -d "PandoraBox.bin.extracted/rootfs" ]; then
             echo "ERROR: FMK解包失败，无rootfs目录！"
-            echo "=== 解包目录详情 ==="
-            ls -la fmk_work/  # 输出所有文件，包括隐藏文件
+            ls -la PandoraBox.bin.extracted/  # 输出解包目录详情
             exit 1
           fi
+          
+          # 移动解包文件到fmk_work，统一后续流程
+          mkdir -p fmk_work
+          mv PandoraBox.bin.extracted/* fmk_work/
           echo "✅ FMK自动解包完成"
           ls -l fmk_work/rootfs/ | head -n10
 
-      - name: 直接重新打包（无修改，验证流程）
+      - name: 旧版FMK自动打包（原生参数）
         run: |
-          echo "=== 用FMK自动打包（贴合帖子格式要求） ==="
+          echo "=== 旧版FMK自动打包 ==="
           cd fmk_work
-          # 帖子核心打包命令，添加-v参数输出详细日志
-          ../fmk/build-firmware.sh -v \
-            -s 4.0 \  # 匹配原固件Squashfs 4.0版本
+          # 旧版FMK打包命令：无-v参数，仅指定Squashfs版本和输出文件
+          ../fmk/build-firmware.sh \
+            -s 4.0 \  # 匹配原固件Squashfs 4.0版本（关键）
             -o ../Modified_PandoraBox_K1_Original.bin
           
           cd ../
@@ -77,16 +78,16 @@ jobs:
           fi
           echo "✅ 打包完成"
 
-      - name: 验证新固件（帖子推荐的完整性检查）
+      - name: 验证新固件（确保启动兼容）
         run: |
           echo "=== 原固件 vs 新固件 对比 ==="
           ls -lh PandoraBox.bin Modified_PandoraBox_K1_Original.bin
           ORIG_SIZE=$(stat -c%s "PandoraBox.bin")
           NEW_SIZE=$(stat -c%s "Modified_PandoraBox_K1_Original.bin")
           DIFF=$((NEW_SIZE - ORIG_SIZE))
-          echo "大小差异：$DIFF 字节（±100KB内均正常）"
+          echo "大小差异：$DIFF 字节（±200KB内均正常）"
           
-          # 验证固件格式（帖子强调必须是TRX/uImage格式）
+          # 验证固件格式（必须包含TRX/uImage，适配潘多拉启动）
           file Modified_PandoraBox_K1_Original.bin
           if ! file Modified_PandoraBox_K1_Original.bin | grep -E "TRX|uImage"; then
             echo "ERROR: 新固件格式异常！"
@@ -97,8 +98,8 @@ jobs:
       - name: 上传最终固件+解包日志
         uses: actions/upload-artifact@v4
         with:
-          name: PandoraBox_K1_FMK_Repacked
+          name: PandoraBox_K1_FMK_Compatible
           path: |
             Modified_PandoraBox_K1_Original.bin
-            fmk_work/  # 上传解包目录，方便后续排错
+            fmk_work/  # 上传解包目录，方便排错
           retention-days: 30
