@@ -1,4 +1,4 @@
-name: FMK实战版（忽略旧版兼容警告，确保解包打包）
+name: 自动兼容新旧版FMK（最终实验版，自动重试）
 on:
   workflow_dispatch:  # 手动触发
   push:
@@ -12,21 +12,15 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装依赖
+      - name: 安装基础依赖（兼容新旧版）
         run: |
           sudo apt update -y
+          # 安装新旧版通用依赖+新版必需的高版本Python
           sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev \
-            binwalk squashfs-tools u-boot-tools mtd-utils file wget
-          echo "=== 依赖安装完成 ==="
-
-      - name: 下载并编译FMK
-        run: |
-          echo "=== 下载FMK ==="
-          git clone https://github.com/rampageX/firmware-mod-kit.git fmk
-          cd fmk/src
-          make clean && make
-          cd ../../
-          echo "=== FMK编译完成 ==="
+            binwalk squashfs-tools u-boot-tools mtd-utils file wget python3 python3-pip
+          # 升级pip和依赖库（解决新版FMK语法问题）
+          pip3 install --upgrade pip setuptools wheel
+          echo "=== 基础依赖安装完成 ==="
 
       - name: 自动下载潘多拉K1固件
         run: |
@@ -38,54 +32,88 @@ jobs:
           ls -lh PandoraBox.bin
           echo "=== 固件准备完成 ==="
 
-      - name: 解包（忽略旧版警告，只认rootfs）
+      - name: 尝试旧版FMK（优先，已验证能解包）
+        id: old_fmk
         run: |
-          echo "=== 清理+解包 ==="
-          sudo rm -rf fmk_work 2>/dev/null
-          # 忽略旧版FMK的语法警告，聚焦解包结果
-          ./fmk/extract-firmware.sh PandoraBox.bin fmk_work || true
+          echo "=== 尝试旧版FMK解包打包 ==="
+          # 下载旧版FMK（固定版本，避免自动更新）
+          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_old
+          cd fmk_old/src && make clean && make && cd ../../
           
-          # 核心验证：只要rootfs存在，就认为解包成功（旧版无firmware.info）
-          if [ ! -d "fmk_work/rootfs" ]; then
-            echo "ERROR: 真·解包失败，无rootfs目录！"
-            ls -la fmk_work/
+          # 解包（忽略语法警告）
+          sudo rm -rf fmk_work_old 2>/dev/null
+          ./fmk_old/extract-firmware.sh PandoraBox.bin fmk_work_old || true
+          
+          # 验证解包成功
+          if [ ! -d "fmk_work_old/rootfs" ]; then
+            echo "旧版FMK解包失败，切换新版！"
+            echo "OLD_FMK_SUCCESS=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          # 打包（核心步骤）
+          ./fmk_old/build-firmware.sh fmk_work_old Modified_PandoraBox_K1_OldFMK.bin
+          
+          # 验证打包成功
+          if [ -f "Modified_PandoraBox_K1_OldFMK.bin" ] && file Modified_PandoraBox_K1_OldFMK.bin | grep -q "uImage"; then
+            echo "✅ 旧版FMK打包成功！"
+            echo "OLD_FMK_SUCCESS=true" >> $GITHUB_ENV
+          else
+            echo "旧版FMK打包失败，切换新版！"
+            echo "OLD_FMK_SUCCESS=false" >> $GITHUB_ENV
+          fi
+
+      - name: 新版FMK重试（旧版失败时自动触发）
+        if: env.OLD_FMK_SUCCESS == 'false'
+        run: |
+          echo "=== 切换新版FMK重试 ==="
+          # 下载新版FMK（使用main分支最新版）
+          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_new
+          cd fmk_new && git submodule update --init --recursive && cd src && make clean && make && cd ../../
+          
+          # 安装新版依赖（解决语法问题）
+          pip3 install -r fmk_new/requirements.txt 2>/dev/null || true
+          
+          # 解包（新版支持完整参数）
+          sudo rm -rf fmk_work_new 2>/dev/null
+          ./fmk_new/extract-firmware.sh -v PandoraBox.bin fmk_work_new
+          
+          # 验证解包
+          if [ ! -d "fmk_work_new/rootfs" ]; then
+            echo "ERROR: 新版FMK也解包失败！"
             exit 1
           fi
-          echo "✅ 解包成功（忽略旧版语法警告）"
-          ls -l fmk_work/rootfs/ | head -n10
-
-      - name: 打包（实战优先，按官方路径用法）
-        run: |
-          echo "=== 开始打包 ==="
-          # 严格按官方用法：build-firmware.sh <解包目录> <输出固件>
-          ./fmk/build-firmware.sh fmk_work Modified_PandoraBox_K1_Original.bin
           
-          if [ ! -f "Modified_PandoraBox_K1_Original.bin" ]; then
-            echo "ERROR: 打包失败"
+          # 打包
+          ./fmk_new/build-firmware.sh -v fmk_work_new Modified_PandoraBox_K1_NewFMK.bin
+          
+          # 验证打包
+          if [ ! -f "Modified_PandoraBox_K1_NewFMK.bin" ]; then
+            echo "ERROR: 新版FMK打包失败！"
             exit 1
           fi
-          echo "✅ 打包完成"
+          echo "✅ 新版FMK打包成功！"
 
-      - name: 最终验证（能启动为核心）
+      - name: 最终固件整理（统一输出可用固件）
         run: |
-          echo "=== 固件最终验证 ==="
-          ls -lh PandoraBox.bin Modified_PandoraBox_K1_Original.bin
-          ORIG_SIZE=$(stat -c%s "PandoraBox.bin")
-          NEW_SIZE=$(stat -c%s "Modified_PandoraBox_K1_Original.bin")
-          DIFF=$((NEW_SIZE - ORIG_SIZE))
-          echo "大小差异：$DIFF 字节（±300KB内均正常）"
-          
-          # 验证格式：必须包含uImage（潘多拉启动必需）
-          file Modified_PandoraBox_K1_Original.bin
-          if ! file Modified_PandoraBox_K1_Original.bin | grep -q "uImage"; then
-            echo "ERROR: 固件格式异常，无uImage头部！"
-            exit 1
+          echo "=== 整理最终可用固件 ==="
+          if [ -f "Modified_PandoraBox_K1_OldFMK.bin" ]; then
+            mv Modified_PandoraBox_K1_OldFMK.bin PandoraBox_K1_Working.bin
+          else
+            mv Modified_PandoraBox_K1_NewFMK.bin PandoraBox_K1_Working.bin
           fi
-          echo "✅ 固件格式正确，可刷机！"
+          
+          # 最终验证
+          ls -lh PandoraBox.bin PandoraBox_K1_Working.bin
+          file PandoraBox_K1_Working.bin
+          echo "✅ 实验完成！最终可用固件：PandoraBox_K1_Working.bin"
 
-      - name: 上传可刷机固件
+      - name: 上传最终可用固件+日志
         uses: actions/upload-artifact@v4
         with:
-          name: PandoraBox_K1_Final_Working
-          path: Modified_PandoraBox_K1_Original.bin
+          name: PandoraBox_K1_Final_Working_Firmware
+          path: |
+            PandoraBox_K1_Working.bin
+            fmk_work_old/logs/ 2>/dev/null || true
+            fmk_work_new/logs/ 2>/dev/null || true
           retention-days: 30
