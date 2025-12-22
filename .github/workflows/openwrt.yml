@@ -1,9 +1,10 @@
 name: Ros_Bin_Auto_Trigger
 # 改为自动触发：提交代码到main分支时运行
 on:
-  push:
-    branches: [main]  # 若你的主分支是其他名称（如master），请修改这里
-
+   workflow_dispatch:
+   push:
+     paths:
+       - '.github/workflows/openwrt.yml'
 jobs:
   build:
     runs-on: ubuntu-latest
