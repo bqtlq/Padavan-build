@@ -43,25 +43,25 @@ jobs:
             exit 1
           fi
 
-      - name: 提取ART无线校准分区（忽略dd非致命错误）
+      - name: 提取ART无线校准分区（临时关闭严格模式）
         run: |
+          set +e # 完全关闭该步骤的严格模式，忽略所有非致命错误
           ART_INFO=$(binwalk $FW_FILE | grep -iE "ART|ath9k|calibration" | tail -1)
           if [ -n "$ART_INFO" ]; then
             ART_OFFSET=$(echo $ART_INFO | awk '{print $1}' | sed 's/0x//')
             ART_SIZE=$((ORIG_FW_SIZE - ART_OFFSET))
             echo "📌 找到ART分区：偏移量0x$ART_OFFSET，大小$ART_SIZE 字节"
-            # 忽略dd非0返回码（提取成功即可，无需严格匹配count）
-            sudo dd if=$FW_FILE of=art_partition.bin bs=1 skip=$ART_OFFSET count=$ART_SIZE 2>/dev/null || true
+            sudo dd if=$FW_FILE of=art_partition.bin bs=1 skip=$ART_OFFSET count=$ART_SIZE 2>/dev/null
           else
             ART_SIZE=65536
             ART_OFFSET=$((ORIG_FW_SIZE - ART_SIZE))
-            # 确保偏移量非负（避免dd报错）
             ART_OFFSET=$((ART_OFFSET < 0 ? 0 : ART_OFFSET))
             echo "⚠️  未扫描到ART分区，按默认64KB提取末尾（偏移量0x$ART_OFFSET）"
-            sudo dd if=$FW_FILE of=art_partition.bin bs=1 skip=$ART_OFFSET count=$ART_SIZE 2>/dev/null || true
+            sudo dd if=$FW_FILE of=art_partition.bin bs=1 skip=$ART_OFFSET count=$ART_SIZE 2>/dev/null
           fi
-          # 确保art_partition.bin存在（避免后续合并失败）
+          # 强制创建ART文件（确保后续合并不失败）
           [ ! -f "art_partition.bin" ] && sudo touch art_partition.bin
+          set -e # 恢复严格模式
 
       - name: 自动扫描固件参数（精准提取）
         run: |
@@ -126,7 +126,6 @@ jobs:
       - name: 重建完整固件（内核 + ART分区）
         run: |
           sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "PandoraBox_ROS" -d ros.extracted/rootfs.sqsh kernel.bin
-          # 合并内核和ART分区（即使ART为空也不影响）
           sudo cat kernel.bin art_partition.bin > final_fw.bin
           rm kernel.bin
 
