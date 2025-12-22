@@ -1,89 +1,72 @@
-# 工作流名称
 name: 解包删除PPPoE并重新打包PandoraBox固件
 
-# 触发方式：手动触发（推荐）+ 推送代码触发
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
   push:
     paths:
-      - '.github/workflows/openwrt.yml'  # 仅修改此文件时触发推送
+      - '.github/workflows/openwrt.yml'
 
 jobs:
   modify-firmware:
     runs-on: ubuntu-latest
     steps:
-      # 1. 检出仓库代码
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      # 2. 安装解包/打包工具
       - name: 安装依赖工具
         run: |
           sudo apt update -y
-          sudo apt install -y binwalk squashfs-tools build-essential wget
-          # 安装潘多拉专用squashfs工具（适配固件格式）
-          wget https://github.com/hanwckf/pandorabox/raw/master/tools/mksquashfs4
-          wget https://github.com/hanwckf/pandorabox/raw/master/tools/unsquashfs4
-          chmod +x mksquashfs4 unsquashfs4
-          sudo mv mksquashfs4 unsquashfs4 /usr/bin/
+          sudo apt install -y binwalk squashfs-tools build-essential  # 仅保留系统原生工具
+          # 验证工具安装
+          mksquashfs -version
+          unsquashfs -version
 
-      # 3. 复制固件到工作目录
       - name: 加载PandoraBox.bin固件
         run: |
           cp .github/workflows/PandoraBox.bin ./PandoraBox.bin
-          ls -l ./PandoraBox.bin  # 验证文件存在
+          ls -l ./PandoraBox.bin
 
-      # 4. 解包固件
       - name: 解包PandoraBox固件
         run: |
-          binwalk -Me PandoraBox.bin  # 递归提取文件系统
-          # 查看解包后的目录结构
+          binwalk -Me PandoraBox.bin
           ls -l _PandoraBox.bin.extracted/
-          # 进入根文件系统目录
           cd _PandoraBox.bin.extracted/squashfs-root || exit 1
           pwd
 
-      # 5. 删除PPPoE相关组件（核心步骤）
       - name: 删除PPPoE组件
         run: |
           cd _PandoraBox.bin.extracted/squashfs-root || exit 1
-          # 1. 删除PPPoE二进制/可执行文件
+          # 删除PPPoE二进制/配置/脚本
           rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe*
-          # 2. 删除PPPoE配置文件
-          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe*
-          # 3. 删除PPPoE启动脚本
-          rm -f ./etc/init.d/pppoe
-          # 4. 删除opkg包状态中的PPPoE记录（如ppp-mod-pppoe）
-          sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status
-          sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status
-          # 5. 查找并删除所有PPPoE残留文件
+          rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe
+          # 清理opkg状态记录
+          sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null
+          sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null
+          # 清理残留文件
           find . -name "*pppoe*" -exec rm -rf {} \; 2>/dev/null
           cd ../../
 
-      # 6. 重新打包根文件系统（潘多拉专用参数）
       - name: 重新打包squashfs镜像
         run: |
           cd _PandoraBox.bin.extracted/
-          # 使用潘多拉工具打包，参数与原固件一致（lzma压缩+256K块）
-          mksquashfs4 squashfs-root new_rootfs.bin -comp lzma -b 262144 -noappend
+          # 用系统工具打包，参数与潘多拉固件一致（lzma+256K块）
+          mksquashfs squashfs-root new_rootfs.bin -comp lzma -b 262144 -noappend -all-root
           ls -l new_rootfs.bin
           cd ../
 
-      # 7. 合并固件头部与新根文件系统（关键：否则无法刷机）
       - name: 合并生成最终固件
         run: |
-          # 分离原固件的bootloader头部（前4096字节）
+          # 分离原固件头部（前4096字节为bootloader）
           dd if=PandoraBox.bin of=bootloader.bin bs=1 count=4096
           # 合并头部+新根文件系统
           cat bootloader.bin _PandoraBox.bin.extracted/new_rootfs.bin > Modified_PandoraBox.bin
-          # 验证新固件
+          # 校验固件结构
+          binwalk Modified_PandoraBox.bin
           ls -l Modified_PandoraBox.bin
-          binwalk Modified_PandoraBox.bin  # 检查固件结构是否正常
 
-      # 8. 上传修改后的固件（作为产物下载）
       - name: 上传修改后的固件
         uses: actions/upload-artifact@v4
         with:
           name: Modified_PandoraBox_NoPPPoE
           path: ./Modified_PandoraBox.bin
-          retention-days: 30  # 产物保留30天
+          retention-days: 30
