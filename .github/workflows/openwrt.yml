@@ -59,10 +59,9 @@ jobs:
       - name: 自动重建启动头部
         run: sudo mkimage -A mips -O linux -T kernel -C lzma -a 0x80000000 -e 0x80000000 -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
 
-      - name: 直接上传BIN文件（不压缩）
+      - name: 上传固件（默认ZIP压缩，移除无效参数消除警告）
         uses: actions/upload-artifact@v4
         with:
-          name: Auto_Trigger_Working_Firmware # 下载后的文件名（无后缀）
+          name: Auto_Trigger_Working_Firmware
           path: final_fw.bin
           retention-days: 30
-          archive: false # 关键！禁用ZIP压缩，直接上传BIN文件
