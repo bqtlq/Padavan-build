@@ -1,4 +1,4 @@
-name: 纯解包+直接打包（优化版，贴合文章思路）
+name: 纯解包+直接打包（稳定版，无兼容报错）
 on:
   workflow_dispatch:  # 手动触发
   push:
@@ -12,10 +12,9 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装核心依赖工具（文章推荐工具集）
+      - name: 安装核心依赖工具
         run: |
           sudo apt update -y
-          # 完全贴合文章推荐工具：binwalk+squashfs-tools+u-boot-tools+dd（系统自带）
           sudo apt install -y binwalk squashfs-tools build-essential mtd-utils file wget u-boot-tools
           echo "=== 工具版本验证 ==="
           mksquashfs -version | head -n1
@@ -30,11 +29,10 @@ jobs:
             --timeout=30 \
             --tries=3 || { echo "ERROR: 固件下载失败"; exit 1; }
           
-          echo "=== 原固件信息（贴合文章结构分析） ==="
+          echo "=== 原固件信息 ==="
           ls -lh PandoraBox.bin
           ORIGINAL_SIZE=$(stat -c%s "PandoraBox.bin")
           echo "原固件大小：$ORIGINAL_SIZE 字节"
-          # 文章强调先分析结构，这里补充binwalk关键输出
           binwalk -x none PandoraBox.bin | grep -E "uImage|Squashfs"
           
           file PandoraBox.bin
@@ -44,7 +42,7 @@ jobs:
           fi
           echo "✅ 固件下载并验证成功"
 
-      - name: 精准解包（贴合文章分离逻辑）
+      - name: 精准解包（保留权限）
         run: |
           mkdir -p firmware_split rootfs
           echo "=== 开始精准解包 ==="
@@ -52,11 +50,11 @@ jobs:
           UIMAGE_HEADER_SIZE=64
           SQUASHFS_OFFSET=$((0x162FAA))
           
-          # 文章核心：分离uImage头部（64字节）
+          # 分离uImage头部
           dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=$UIMAGE_HEADER_SIZE 2>/dev/null
           echo "✅ 已分离uImage头部（$UIMAGE_HEADER_SIZE字节）"
           
-          # 分离Squashfs文件系统（文章强调的核心步骤）
+          # 分离Squashfs镜像
           dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
           if ! file firmware_split/rootfs.squashfs | grep -q "Squashfs filesystem"; then
             echo "ERROR: Squashfs镜像无效！"
@@ -65,41 +63,40 @@ jobs:
           fi
           echo "✅ Squashfs镜像验证有效"
           
-          # 解包：保留原文件权限（文章提到避免权限错乱），跳过设备文件
+          # 解包：跳过设备文件，保留原权限
           unsquashfs -n -p 4 -d rootfs firmware_split/rootfs.squashfs || true
-          # 补充：修复可能的权限问题（文章隐含的稳定点）
+          # 修复权限（避免启动时权限错误）
           sudo chown -R root:root rootfs/ 2>/dev/null || true
           
-          # 验证解包成功（文章强调核心目录存在）
+          # 验证核心目录
           if [ ! -d "rootfs/etc" ] || [ ! -d "rootfs/usr" ] || [ ! -d "rootfs/bin" ]; then
             echo "ERROR: 解包失败，核心目录不存在！"
             exit 1
           fi
-          echo "✅ Squashfs解包完成（保留原文件权限）"
+          echo "✅ Squashfs解包完成"
           ls -l rootfs/ | head -n10
 
-      - name: 重新打包（贴合文章格式要求）
+      - name: 重新打包（无兼容报错）
         run: |
           echo "=== 开始重新打包Squashfs ==="
-          # 优化点1：保留原文件权限（-preserve-permissions），文章强调避免权限问题
-          # 优化点2：添加-no-xattrs，避免扩展属性干扰（老固件兼容）
+          # 彻底移除 -Xbcj mips，仅保留稳定核心参数
           mksquashfs rootfs/ firmware_split/new_rootfs.squashfs \
-            -comp xz \
-            -b 262144 \
-            -noappend \
-            -all-root \
-            -preserve-permissions \  # 新增：保留原文件权限
-            -no-xattrs \             # 新增：避免扩展属性干扰
-            -processors 2
+            -comp xz \                # 与原固件一致的压缩格式
+            -b 262144 \               # 256K块大小（原固件参数）
+            -noappend \               # 不追加模式
+            -all-root \               # 所有文件归属root
+            -preserve-permissions \   # 保留原文件权限（稳定关键）
+            -no-xattrs \              # 禁用扩展属性（兼容老固件）
+            -processors 2             # 多线程加速
           
           if [ ! -f "firmware_split/new_rootfs.squashfs" ]; then
             echo "ERROR: 打包失败"
             exit 1
           fi
-          echo "✅ Squashfs打包完成"
+          echo "✅ Squashfs打包完成（无兼容报错）"
           ls -lh firmware_split/new_rootfs.squashfs
 
-      - name: 重建uImage头部（文章核心强调步骤）
+      - name: 重建uImage头部（确保启动）
         run: |
           echo "=== 重建uImage头部并合并固件 ==="
           mkimage \
@@ -118,8 +115,8 @@ jobs:
             exit 1
           fi
           
-          # 补充：验证新固件结构（文章提到的完整性检查）
-          echo "=== 新固件结构验证（贴合文章要求） ==="
+          # 验证新固件结构
+          echo "=== 新固件结构验证 ==="
           binwalk -x none Modified_PandoraBox_K1_Original.bin | grep -E "uImage|Squashfs"
           if ! binwalk -x none Modified_PandoraBox_K1_Original.bin | grep -q "Squashfs filesystem"; then
             echo "ERROR: 新固件缺少Squashfs文件系统！"
@@ -133,7 +130,7 @@ jobs:
           DIFF=$((NEW_SIZE - ORIGINAL_SIZE))
           echo "大小差异：$DIFF 字节（±500KB内均正常）"
           
-          echo "✅ 可刷机固件生成完成"
+          echo "✅ 可刷机固件生成完成！"
 
       - name: 上传验证用固件
         uses: actions/upload-artifact@v4
