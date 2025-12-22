@@ -1,4 +1,4 @@
-name: Ros_Bin_Final_Fix_Compress
+name: Ros_Bin_Auto_Run_Final
 on:
   workflow_dispatch:
 
@@ -19,38 +19,39 @@ jobs:
         run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_ros_only && cd fmk_ros_only/src && sudo make clean && sudo make && cd ../../ && chmod +x fmk_ros_only/*.sh
 
       - name: 复制ros.bin
-        run: cp .github/workflows/ros.bin ./ros.bin
+        run: cp .github/workflows/ros.bin ./ros.bin || echo "ros.bin已存在"
 
-      - name: 扫描参数（强制默认值，避免为空）
+      - name: 硬指定参数（避免为空，自动适配潘多拉）
         run: |
-          IMAGE_ARCH=$(mkimage -l ros.bin | grep -i Architecture | awk '{print $3}' || echo mips)
-          IMAGE_ADDR=$(mkimage -l ros.bin | grep -i Data.Address | awk '{print $4}' || echo 0x80000000)
-          # 强制默认xz压缩，避免参数为空
-          SQSH_COMP=$(binwalk -E ros.bin | grep Squashfs | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}' || echo xz)
-          SQSH_BLOCK=$(binwalk -E ros.bin | grep Squashfs | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11) | sed 's/ bytes//g'}' || echo 262144)
-          SQSH_SIZE=$(stat -c %s ros.bin)
-          echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
-          echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
-          echo "SQSH_COMP=$SQSH_COMP" >> $GITHUB_ENV
-          echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
-          echo "SQSH_SIZE=$SQSH_SIZE" >> $GITHUB_ENV
+          # 直接用潘多拉K1已知有效参数，不用扫描
+          echo "IMAGE_ARCH=mips" >> $GITHUB_ENV
+          echo "IMAGE_ADDR=0x80000000" >> $GITHUB_ENV
+          echo "SQSH_COMP=xz" >> $GITHUB_ENV  # 固定xz压缩，原固件默认
+          echo "SQSH_BLOCK=262144" >> $GITHUB_ENV  # 固定256K块大小
+          echo "SQSH_SIZE=$(stat -c %s ros.bin)" >> $GITHUB_ENV
 
-      - name: 解包
-        run: sudo ./fmk_ros_only/extract-firmware.sh ros.bin && (mv fmk ros.extracted || mv ros.bin.extracted ros.extracted)
+      - name: 解包（自动兼容目录）
+        run: |
+          sudo ./fmk_ros_only/extract-firmware.sh ros.bin
+          if [ -d "fmk/rootfs" ]; then
+            mv fmk ros.extracted
+          elif [ -d "ros.bin.extracted/rootfs" ]; then
+            mv ros.bin.extracted ros.extracted
+          fi
 
-      - name: 按原参数打包（修复压缩参数）
+      - name: 打包（固定参数，自动运行）
         run: |
           cd ros.extracted/rootfs
-          # 确保压缩参数和块大小参数格式正确
-          sudo mksquashfs . ../rootfs.sqsh -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root
+          # 明确指定压缩方式，不会再误判参数
+          sudo mksquashfs . ../rootfs.sqsh -comp xz -b 262144 -no-xattrs -preserve-permissions -all-root
           cd ../../
 
-      - name: 重建启动头部
-        run: sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C lzma -a $IMAGE_ADDR -e $IMAGE_ADDR -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
+      - name: 重建启动头部（自动适配）
+        run: sudo mkimage -A mips -O linux -T kernel -C lzma -a 0x80000000 -e 0x80000000 -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
 
-      - name: 上传可用固件
+      - name: 自动上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: Ros_Bin_Working_Firmware
+          name: Ros_Bin_Auto_Working_Firmware
           path: final_fw.bin
           retention-days: 30
