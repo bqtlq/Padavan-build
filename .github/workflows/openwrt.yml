@@ -1,4 +1,4 @@
-name: Ros_Bin_No_More_Errors
+name: Ros_Bin_Final_Fix_Compress
 on:
   workflow_dispatch:
 
@@ -12,19 +12,20 @@ jobs:
       - name: 安装工具
         run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
 
-      - name: 彻底清理所有FMK残留（必做！）
-        run: sudo rm -rf fmk* fmk_uniq* ros.extracted ros.bin.extracted final_fw.bin 2>/dev/null
+      - name: 彻底清理残留
+        run: sudo rm -rf fmk* fmk_ros_only* ros.extracted ros.bin.extracted final_fw.bin 2>/dev/null
 
-      - name: 克隆FMK（唯一目录名，永不会冲突）
+      - name: 克隆FMK（唯一目录名）
         run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_ros_only && cd fmk_ros_only/src && sudo make clean && sudo make && cd ../../ && chmod +x fmk_ros_only/*.sh
 
       - name: 复制ros.bin
         run: cp .github/workflows/ros.bin ./ros.bin
 
-      - name: 扫描原固件参数（自动匹配）
+      - name: 扫描参数（强制默认值，避免为空）
         run: |
           IMAGE_ARCH=$(mkimage -l ros.bin | grep -i Architecture | awk '{print $3}' || echo mips)
           IMAGE_ADDR=$(mkimage -l ros.bin | grep -i Data.Address | awk '{print $4}' || echo 0x80000000)
+          # 强制默认xz压缩，避免参数为空
           SQSH_COMP=$(binwalk -E ros.bin | grep Squashfs | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}' || echo xz)
           SQSH_BLOCK=$(binwalk -E ros.bin | grep Squashfs | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11) | sed 's/ bytes//g'}' || echo 262144)
           SQSH_SIZE=$(stat -c %s ros.bin)
@@ -34,13 +35,17 @@ jobs:
           echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
           echo "SQSH_SIZE=$SQSH_SIZE" >> $GITHUB_ENV
 
-      - name: 解包（无冲突）
+      - name: 解包
         run: sudo ./fmk_ros_only/extract-firmware.sh ros.bin && (mv fmk ros.extracted || mv ros.bin.extracted ros.extracted)
 
-      - name: 按原参数打包
-        run: cd ros.extracted/rootfs && sudo mksquashfs . ../rootfs.sqsh -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root && cd ../../
+      - name: 按原参数打包（修复压缩参数）
+        run: |
+          cd ros.extracted/rootfs
+          # 确保压缩参数和块大小参数格式正确
+          sudo mksquashfs . ../rootfs.sqsh -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root
+          cd ../../
 
-      - name: 重建启动头部（确保能启动）
+      - name: 重建启动头部
         run: sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C lzma -a $IMAGE_ADDR -e $IMAGE_ADDR -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
 
       - name: 上传可用固件
