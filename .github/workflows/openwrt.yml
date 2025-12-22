@@ -1,109 +1,48 @@
-name: Ros_Bin_Process_Fix
+name: Ros_Bin_Simple_Working
 on:
-  workflow_dispatch: # 仅手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出仓库（拉取ros.bin）
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 安装基础工具
-        run: |
-          sudo apt update -y
-          sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
-          echo "✅ 工具安装完成"
+      - name: 安装必需工具
+        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget
 
-      - name: 克隆并编译FMK（加执行权限）
-        run: |
-          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git ./fmk_tool
-          chmod +x ./fmk_tool/*.sh
-          cd ./fmk_tool/src && sudo make clean && sudo make && cd ../../
-          echo "✅ FMK编译完成"
+      - name: 克隆编译FMK
+        run: git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk && cd fmk/src && sudo make clean && sudo make && cd ../../ && chmod +x fmk/*.sh
 
-      - name: 检查并复制ros.bin
-        run: |
-          if [ ! -f ".github/workflows/ros.bin" ]; then
-            echo "ERROR: 未找到ros.bin，请检查文件位置！"
-            exit 0 # 用exit 0避免工作流直接失败
-          fi
-          cp .github/workflows/ros.bin ./ros.bin
-          ls -lh ./ros.bin
-          echo "✅ ros.bin已加载"
+      - name: 复制ros.bin
+        run: cp .github/workflows/ros.bin ./ros.bin
 
-      - name: 扫描ros.bin参数（容错）
+      - name: 扫描原固件参数（自动匹配）
         run: |
-          # 初始化默认参数
-          export IMAGE_ARCH="mips"
-          export IMAGE_ADDR="0x80000000"
-          export IMAGE_COMP="lzma"
-          export SQSH_COMP="xz"
-          export SQSH_BLOCK="262144"
-          export SQSH_SIZE=$(stat -c %s ./ros.bin)
-          export IMAGE_NAME="MIPSPandoraBoxLinux-3.14.79"
-          
-          # 尝试扫描真实参数
-          if mkimage -l ./ros.bin 2>/dev/null; then
-            IMAGE_ARCH=$(mkimage -l ./ros.bin | grep -i "Architecture" | awk '{print $3}' | sed 's/://g')
-            IMAGE_ADDR=$(mkimage -l ./ros.bin | grep -i "Data Address" | awk '{print $4}')
-          fi
-          if binwalk -E ./ros.bin | grep -i "Squashfs filesystem"; then
-            SQSH_COMP=$(binwalk -E ./ros.bin | grep -i "Squashfs filesystem" | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}')
-          fi
-          
-          # 存入环境变量
+          IMAGE_ARCH=$(mkimage -l ros.bin | grep -i Architecture | awk '{print $3}' || echo mips)
+          IMAGE_ADDR=$(mkimage -l ros.bin | grep -i Data.Address | awk '{print $4}' || echo 0x80000000)
+          SQSH_COMP=$(binwalk -E ros.bin | grep Squashfs | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /compression:/) print substr($i,12)}' || echo xz)
+          SQSH_BLOCK=$(binwalk -E ros.bin | grep Squashfs | awk -F ', ' '{for(i=1;i<=NF;i++) if($i ~ /blocksize:/) print substr($i,11) | sed 's/ bytes//g'}' || echo 262144)
+          SQSH_SIZE=$(stat -c %s ros.bin)
           echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
           echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
-          echo "IMAGE_COMP=$IMAGE_COMP" >> $GITHUB_ENV
           echo "SQSH_COMP=$SQSH_COMP" >> $GITHUB_ENV
           echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
           echo "SQSH_SIZE=$SQSH_SIZE" >> $GITHUB_ENV
-          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
-          echo "📌 最终参数：$IMAGE_ARCH | $SQSH_COMP"
 
-      - name: 解包ros.bin（绝对路径执行）
-        run: |
-          FMK_PATH=$(pwd)/fmk_tool
-          sudo $FMK_PATH/extract-firmware.sh ./ros.bin || true
-          # 兼容解包目录
-          if [ -d "fmk/rootfs" ]; then
-            mv fmk ros.bin.extracted
-          fi
-          echo "✅ 解包完成（忽略警告）"
+      - name: 解包
+        run: sudo ./fmk/extract-firmware.sh ros.bin && (mv fmk ros.extracted || mv ros.bin.extracted ros.extracted)
 
-      - name: 打包Squashfs
-        run: |
-          if [ -d "ros.bin.extracted/rootfs" ]; then
-            cd ros.bin.extracted/rootfs
-            sudo mksquashfs . ../rootfs-new.squashfs -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root -noappend
-            cd ../../
-          else
-            cp ./ros.bin ./ros.bin.extracted/rootfs-new.squashfs 2>/dev/null || true
-          fi
-          echo "✅ Squashfs打包完成"
+      - name: 按原参数打包
+        run: cd ros.extracted/rootfs && sudo mksquashfs . ../rootfs.sqsh -comp $SQSH_COMP -b $SQSH_BLOCK -no-xattrs -preserve-permissions -all-root && cd ../../
 
-      - name: 重建固件
-        run: |
-          # 生成最终固件
-          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ADDR -n "$IMAGE_NAME" -d ros.bin.extracted/rootfs-new.squashfs final_fw.bin 2>/dev/null || true
-          # 匹配原体积
-          sudo truncate -s $SQSH_SIZE final_fw.bin 2>/dev/null || true
-          echo "✅ 固件重建完成"
+      - name: 重建启动头部（关键）
+        run: sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C lzma -a $IMAGE_ADDR -e $IMAGE_ADDR -d ros.extracted/rootfs.sqsh final_fw.bin && sudo truncate -s $SQSH_SIZE final_fw.bin
 
-      - name: 验证固件（独立步骤）
-        run: |
-          if [ -f "final_fw.bin" ]; then
-            ls -lh final_fw.bin ros.bin
-            echo "🎉 final_fw.bin已生成！"
-          else
-            echo "⚠️ 固件生成失败，上传原ros.bin"
-            cp ./ros.bin final_fw.bin
-          fi
-
-      - name: 上传固件（独立步骤，修复语法错误）
+      - name: 上传可用固件
         uses: actions/upload-artifact@v4
         with:
-          name: Ros_Bin_Result
+          name: Working_Firmware
           path: final_fw.bin
           retention-days: 30
