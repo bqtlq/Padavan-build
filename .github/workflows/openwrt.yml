@@ -1,6 +1,6 @@
 name: 自动下载+解包删除PPPoE+打包PandoraBox固件（MT7620-K1专用）
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发（推荐）
   push:
     paths:
       - '.github/workflows/openwrt.yml'
@@ -44,7 +44,7 @@ jobs:
           fi
           echo "✅ 固件下载并验证成功"
 
-      - name: 精准解包uImage格式固件（修复设备文件权限问题）
+      - name: 精准解包uImage格式固件（最终修复版）
         run: |
           mkdir -p firmware_split rootfs
           echo "=== 开始精准解包 ==="
@@ -52,9 +52,11 @@ jobs:
           UIMAGE_HEADER_SIZE=64
           SQUASHFS_OFFSET=$((0x162FAA))
           
+          # 分离uImage头部
           dd if=PandoraBox.bin of=firmware_split/uimage_header.bin bs=1 count=$UIMAGE_HEADER_SIZE 2>/dev/null
           echo "✅ 已分离uImage头部（$UIMAGE_HEADER_SIZE字节）"
           
+          # 提取Squashfs镜像
           dd if=PandoraBox.bin of=firmware_split/rootfs.squashfs bs=1 skip=$SQUASHFS_OFFSET 2>/dev/null
           if ! file firmware_split/rootfs.squashfs | grep -q "Squashfs filesystem"; then
             echo "ERROR: Squashfs镜像无效！"
@@ -63,9 +65,17 @@ jobs:
           fi
           echo "✅ Squashfs镜像验证有效"
           
-          # 核心修复：添加-n参数跳过设备文件创建，避免权限错误
-          unsquashfs -n -d rootfs firmware_split/rootfs.squashfs || { echo "ERROR: 解包失败"; exit 1; }
-          echo "✅ Squashfs解包完成"
+          # 最终修复：忽略设备文件导致的非零退出码，用后续验证替代强制退出
+          unsquashfs -n -d rootfs firmware_split/rootfs.squashfs || true
+          
+          # 关键验证：检查核心目录是否存在（确认解包真成功）
+          if [ ! -d "rootfs/etc" ] || [ ! -d "rootfs/usr" ]; then
+            echo "ERROR: 解包失败，核心目录（etc/usr）不存在！"
+            ls -l rootfs/
+            exit 1
+          fi
+          
+          echo "✅ Squashfs解包完成（已跳过设备文件创建）"
           ls -l rootfs/ | head -n10
 
       - name: 彻底删除PPPoE组件
@@ -73,12 +83,16 @@ jobs:
           cd rootfs || { echo "ERROR: 进入根目录失败"; exit 1; }
           echo "=== 开始删除PPPoE组件 ==="
           
+          # 删除二进制文件
           rm -rf ./usr/sbin/pppoe* ./usr/bin/pppoe* ./usr/sbin/pppd* 2>/dev/null || true
+          # 删除配置与脚本
           rm -f ./etc/config/pppoe ./etc/ppp/peers/pppoe* ./etc/init.d/pppoe 2>/dev/null || true
+          # 删除包信息
           rm -rf ./usr/lib/opkg/info/pppoe* ./usr/lib/opkg/info/ppp-mod-pppoe* 2>/dev/null || true
+          # 清理opkg状态
           sed -i '/Package: ppp-mod-pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
           sed -i '/Package: pppoe/,/^$/d' ./usr/lib/opkg/status 2>/dev/null || true
-          
+          # 清理残留
           残留文件=$(find . -name "*pppoe*" -o -name "*pppd*" 2>/dev/null)
           if [ -n "$残留文件" ]; then
             find . -name "*pppoe*" -o -name "*pppd*" -exec rm -rf {} \; 2>/dev/null || true
