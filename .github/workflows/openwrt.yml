@@ -18,7 +18,7 @@ jobs:
           sudo apt full-upgrade -y
           sudo apt install -y build-essential libncurses5-dev zlib1g-dev gawk git libssl-dev wget unzip ocaml-nox help2man texinfo npm golang node-gyp
 
-      - name: 手动安装Python2.7（解决ubuntu24.04无python2包问题）
+      - name: 手动安装Python2.7（修复软链接冲突）
         run: |
           wget https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz
           tar xzf Python-2.7.18.tgz
@@ -26,7 +26,10 @@ jobs:
           ./configure --prefix=/usr/local --enable-unicode=ucs4 --enable-shared LDFLAGS="-Wl,-rpath /usr/local/lib"
           make -j$(nproc)
           sudo make altinstall
-          sudo ln -s /usr/local/bin/python2.7 /usr/bin/python2
+          # 强制创建python2软链接，覆盖已存在的文件
+          sudo ln -sf /usr/local/bin/python2.7 /usr/bin/python2
+          # 先删除原有python链接，再创建（避免冲突）
+          sudo rm -f /usr/bin/python
           sudo ln -s /usr/local/bin/python2.7 /usr/bin/python
 
       - name: 下载新版ImageBuilder
