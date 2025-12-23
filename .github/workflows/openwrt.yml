@@ -1,139 +1,32 @@
-name: Ros_Bin_Auto_Trigger
+name: Build PandoraBox-phicomm-k1
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - '.github/workflows/openwrt.yml'
-      - '.github/workflows/ros.bin'
+    branches: [main]
+  workflow_dispatch: # 支持手动触发
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04 # 匹配教程指定环境
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
-
-      - name: 安装必需工具
-        run: sudo apt update -y && sudo apt install -y git build-essential zlib1g-dev liblzma-dev liblzo2-dev squashfs-tools u-boot-tools binwalk wget flex bison libssl-dev gddrescue
-
-      - name: 彻底清理残留
-        run: sudo rm -rf fmk* fmk_ros_only* ros.extracted ros.bin.extracted final_fw.bin art_partition.bin 2>/dev/null
-
-      - name: 克隆FMK工具并编译
+      - name: 安装编译依赖
         run: |
-          git clone --depth 1 https://github.com/rampageX/firmware-mod-kit.git fmk_ros_only
-          cd fmk_ros_only/src
-          sudo make clean && sudo make || { echo "ERROR: FMK编译失败"; exit 1; }
-          cd ../../ && chmod +x fmk_ros_only/*.sh
+          sudo apt-get update -y
+          sudo apt-get install -y libssl1.0-dev nodejs-dev node-gyp npm
+          sudo apt-get install -y golang build-essential libncurses5-dev zlib1g-dev gawk git libssl-dev wget unzip python ocaml-nox help2man texinfo yui-compressor
 
-      - name: 定义固件文件名
-        run: echo "FW_FILE=ros.bin" >> $GITHUB_ENV
+      - name: 下载PandoraBox ImageBuilder
+        run: wget http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c.tar.xz
 
-      - name: 检查并复制固件
+      - name: 解压ImageBuilder
+        run: tar -Jxvf PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c.tar.xz
+
+      - name: 编译phicomm-k1固件
         run: |
-          FW_PATH=".github/workflows/$FW_FILE"
-          if [ -f "$FW_PATH" ]; then
-            cp $FW_PATH ./$FW_FILE
-            ORIG_FW_SIZE=$(stat -c %s $FW_FILE)
-            echo "ORIG_FW_SIZE=$ORIG_FW_SIZE" >> $GITHUB_ENV
-          else
-            echo "ERROR: 未找到固件"; exit 1
-          fi
+          cd PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c
+          make image PROFILE="phicomm-k1" PACKAGES=" -dosfsck -luci-i18n-phddns2-zh-cn -mkdosfs"
 
-      - name: 提取ART分区
-        run: |
-          set +e
-          ART_SIZE=65536
-          ART_OFFSET=$((ORIG_FW_SIZE - ART_SIZE))
-          ART_OFFSET=$((ART_OFFSET < 0 ? 0 : ART_OFFSET))
-          sudo dd if=$FW_FILE of=art_partition.bin bs=1 skip=$ART_OFFSET count=$ART_SIZE 2>/dev/null
-          [ ! -f "art_partition.bin" ] && sudo touch art_partition.bin
-          set -e
-
-      - name: 自动扫描固件参数
-        run: |
-          set +e
-          IMAGE_ARCH="mips"
-          IMAGE_ADDR="0x80000000"
-          IMAGE_ENTRY="0x80000000"
-          IMAGE_COMP="lzma"
-          SQSH_COMP="xz"
-          SQSH_BLOCK="262144"
-
-          MKIMAGE_OUTPUT=$(mkimage -l $FW_FILE 2>/dev/null)
-          if [ -n "$MKIMAGE_OUTPUT" ]; then
-            IMAGE_ARCH=$(echo "$MKIMAGE_OUTPUT" | grep -i "Image Type" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
-            IMAGE_COMP=$(echo "$MKIMAGE_OUTPUT" | grep -i "Image Type" | sed -r 's/.*\(([a-z0-9]+) compressed\).*/\1/' | tr '[:upper:]' '[:lower:]')
-            RAW_ADDR=$(echo "$MKIMAGE_OUTPUT" | grep -i "Load Address" | awk '{print $NF}')
-            IMAGE_ADDR="0x$RAW_ADDR"
-            RAW_ENTRY=$(echo "$MKIMAGE_OUTPUT" | grep -i "Entry Point" | awk '{print $NF}')
-            IMAGE_ENTRY="0x$RAW_ENTRY"
-          fi
-          set -e
-
-          if binwalk $FW_FILE | grep -i "Squashfs filesystem" 2>/dev/null; then
-            SQSH_COMP_LINE=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | grep -i "compression")
-            SQSH_COMP=$(echo $SQSH_COMP_LINE | sed -r 's/.*compression: *([a-z0-9]+).*/\1/' | tr -d ' ' || echo "xz")
-            SQSH_BLOCK_LINE=$(binwalk $FW_FILE | grep -i "Squashfs filesystem" | grep -i "blocksize")
-            SQSH_BLOCK=$(echo $SQSH_BLOCK_LINE | sed -r 's/.*blocksize: *([0-9]+).*/\1/' | tr -d ' ' || echo "262144")
-          fi
-
-          VALID_ARCHES=("mips" "arm" "x86" "mips64" "arm64" "x86_64")
-          [[ ! " ${VALID_ARCHES[@]} " =~ " ${IMAGE_ARCH} " ]] && IMAGE_ARCH="mips"
-
-          echo "IMAGE_ARCH=$IMAGE_ARCH" >> $GITHUB_ENV
-          echo "IMAGE_ADDR=$IMAGE_ADDR" >> $GITHUB_ENV
-          echo "IMAGE_ENTRY=$IMAGE_ENTRY" >> $GITHUB_ENV
-          echo "IMAGE_COMP=$IMAGE_COMP" >> $GITHUB_ENV
-          echo "SQSH_COMP=$SQSH_COMP" >> $GITHUB_ENV
-          echo "SQSH_BLOCK=$SQSH_BLOCK" >> $GITHUB_ENV
-
-      - name: 解包并修改rootfs（绕过签名校验）
-        run: |
-          sudo ./fmk_ros_only/extract-firmware.sh $FW_FILE
-          [ -d "$FW_FILE.extracted/rootfs" ] && mv $FW_FILE.extracted ros.extracted || mv fmk ros.extracted
-
-          # 关键步骤1：删除签名校验脚本（PandoraBox常见校验文件）
-          sudo rm -rf ros.extracted/rootfs/etc/init.d/check_signature 2>/dev/null
-          sudo rm -rf ros.extracted/rootfs/usr/bin/verify_firmware 2>/dev/null
-
-          # 关键步骤2：修改uboot启动参数（跳过校验）
-          if [ -f "ros.extracted/rootfs/etc/uEnv.txt" ]; then
-            sudo sed -i '/signature_check/d' ros.extracted/rootfs/etc/uEnv.txt
-            sudo echo "uboot_args=console=ttyS0,115200 root=/dev/mtdblock2 rw noinitrd signature_check=0" >> ros.extracted/rootfs/etc/uEnv.txt
-          fi
-
-          # 关键步骤3：修改启动脚本，跳过校验逻辑
-          if [ -f "ros.extracted/rootfs/etc/rc.d/S01sysinit" ]; then
-            sudo sed -i 's/verify_signature//g' ros.extracted/rootfs/etc/rc.d/S01sysinit
-          fi
-
-      - name: 打包rootfs
-        run: |
-          cd ros.extracted/rootfs
-          sudo mksquashfs . ../rootfs.sqsh -b $SQSH_BLOCK -comp $SQSH_COMP -no-xattrs -all-root -force-uid 0 -force-gid 0
-          cd ../../
-
-      - name: 重建固件（填充至原始大小）
-        run: |
-          sudo mkimage -A $IMAGE_ARCH -O linux -T kernel -C $IMAGE_COMP -a $IMAGE_ADDR -e $IMAGE_ENTRY -n "PandoraBox_ROS" -d ros.extracted/rootfs.sqsh kernel.bin
-          KERNEL_SIZE=$(stat -c %s kernel.bin)
-          ART_SIZE=$(stat -c %s art_partition.bin)
-          CURRENT_TOTAL=$((KERNEL_SIZE + ART_SIZE))
-          PAD_SIZE=$((ORIG_FW_SIZE - CURRENT_TOTAL))
-          PAD_SIZE=$((PAD_SIZE < 0 ? 0 : PAD_SIZE))
-          if [ $PAD_SIZE -gt 0 ]; then
-            sudo dd if=/dev/zero of=pad.bin bs=1 count=$PAD_SIZE 2>/dev/null
-            sudo cat kernel.bin pad.bin art_partition.bin > final_fw.bin
-            rm pad.bin
-          else
-            sudo cat kernel.bin art_partition.bin > final_fw.bin
-          fi
-          rm kernel.bin
-
-      - name: 上传固件
-        uses: actions/upload-artifact@v4
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v3
         with:
-          name: Modified_ROS_Firmware_Sign_Bypassed
-          path: final_fw.bin
-          retention-days: 30
+          name: PandoraBox-phicomm-k1-firmware
+          path: PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c/bin/
