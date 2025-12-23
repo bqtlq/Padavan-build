@@ -1,32 +1,44 @@
 name: Build PandoraBox-phicomm-k1
 on:
   push:
-    branches: [main]
-  workflow_dispatch: # 支持手动触发
+    branches: [main, master] # 适配主流分支名，修改后推送自动触发
+    paths: [".github/workflows/openwrt.yml"] # 仅修改该yml时触发，也可删除此行让所有推送触发
+  workflow_dispatch: # 保留手动触发
 
 jobs:
   build:
-    runs-on: ubuntu-18.04 # 匹配教程指定环境
+    runs-on: ubuntu-22.04 # 改用当前支持的运行器，避免排队
     steps:
+      - name: 清理冗余文件
+        run: rm -f .github/workflows/ros.bin # 移除无关文件
+        
       - name: 安装编译依赖
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y libssl1.0-dev nodejs-dev node-gyp npm
-          sudo apt-get install -y golang build-essential libncurses5-dev zlib1g-dev gawk git libssl-dev wget unzip python ocaml-nox help2man texinfo yui-compressor
-
+          sudo apt update -y
+          sudo apt full-upgrade -y
+          # 适配Ubuntu22.04的依赖包
+          sudo apt install -y build-essential libncurses5-dev zlib1g-dev gawk git libssl-dev wget unzip python2 python3 ocaml-nox help2man texinfo npm golang
+          # 解决node-gyp依赖
+          sudo npm install -g node-gyp
+          
+      - name: 检查下载链接有效性
+        run: |
+          wget --spider http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c.tar.xz || echo "下载链接失效，请更换ImageBuilder地址"
+          
       - name: 下载PandoraBox ImageBuilder
-        run: wget http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c.tar.xz
-
+        run: wget http://downloads.pangubox.com:6380/pandorabox/19.01/targets/ralink/mt7620/PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c.tar.xz -O pb-imagebuilder.tar.xz
+        
       - name: 解压ImageBuilder
-        run: tar -Jxvf PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c.tar.xz
-
+        run: tar -Jxvf pb-imagebuilder.tar.xz
+        
       - name: 编译phicomm-k1固件
         run: |
           cd PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c
-          make image PROFILE="phicomm-k1" PACKAGES=" -dosfsck -luci-i18n-phddns2-zh-cn -mkdosfs"
-
+          make image PROFILE="phicomm-k1" PACKAGES=" -dosfsck -luci-i18n-phddns2-zh-cn -mkdosfs" || { echo "编译失败"; exit 1; }
+          
       - name: 上传编译产物
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4 # 升级到最新版action
         with:
           name: PandoraBox-phicomm-k1-firmware
-          path: PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c/bin/
+          path: ./PandoraBox-ImageBuilder-ralink-mt7620.Linux-x86_64-2018-12-31-git-4b18a9c6c/bin/
+          retention-days: 7 # 产物保留7天，可按需调整
